@@ -149,7 +149,8 @@ def physics_settings(cfg: "InstanceConfig", channel: ChannelPlan) -> dict:
         if isinstance(blk, dict) and blk.get("name") == channel.name:
             offsets = {k: int(v) for k, v in (blk.get("tdma_offset_samples") or {}).items()}
     return {**cfg.physics, "interval_s": cfg.interval_s, "tdma_offset_samples": offsets,
-            "receiver_lat": cfg.receiver_lat, "receiver_lon": cfg.receiver_lon}
+            "receiver_lat": cfg.receiver_lat, "receiver_lon": cfg.receiver_lon,
+            "position_source": cfg.position_source}
 
 
 def load_instance(key: str, etc: Path = DEFAULT_ETC,

@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 
 from chirp_recorder import __version__
-from chirp_recorder.config import ConfigError, grid_centre
+from chirp_recorder.config import ConfigError
 from chirp_recorder.core.catalogue import Transmitter
 from chirp_recorder.core.channels import ChannelPlan
 from chirp_recorder.core.source import Interval
@@ -53,8 +53,33 @@ class PhysicsStopgap:
         self._need: Optional[int] = None
         if self.interval_s is not None:
             self._need = self._intervals_per_cpi(float(self.interval_s))
-        lat, lon = (settings["receiver_lat"], settings["receiver_lon"]) \
-            if "receiver_lat" in settings else grid_centre(host_grid)
+        self.enabled = True
+        src = settings.get("position_source")
+        if src not in ("precise", "grid_centre", "none"):
+            raise ConfigError("physics settings need position_source "
+                              "(precise, grid_centre or none)")
+        grid_len = len(host_grid.strip())
+        if src == "precise" or (src == "grid_centre" and grid_len == 6):
+            if "receiver_lat" not in settings or "receiver_lon" not in settings:
+                raise ConfigError("physics settings need receiver_lat and receiver_lon")
+        if src == "grid_centre" and grid_len == 6:
+            log.warning(
+                "physics on %s runs from the centre of grid square %s, not a precise "
+                "position: ground distance errs up to about 4 km, virtual height by "
+                "about 3-6 km.  Set receiver_lat and receiver_lon to remove it.",
+                reporter_id, host_grid)
+        elif src != "precise":
+            self.enabled = False
+            log.warning(
+                "physics off on %s: no precise position and no 6-character grid square "
+                "(grid %r); a 4-character square would put virtual height wrong by "
+                "tens of km.  Set receiver_lat and receiver_lon.", reporter_id, host_grid)
+            self._need = None
+            self._pipes = []
+            self._ivs = []
+            self._first_label = None
+            return
+        lat, lon = settings["receiver_lat"], settings["receiver_lon"]
         offsets = settings.get("tdma_offset_samples") or {}
         version = f"chirp-recorder/{__version__}"
         self._pipes: list[tuple[TransmitterPipeline, float]] = []
@@ -105,6 +130,8 @@ class PhysicsStopgap:
                 <= _INDEX_TOL)
 
     def feed(self, iv: Interval, label: Label) -> PhysicsOut:
+        if not self.enabled:
+            return PhysicsOut()
         if self._need is None:
             self._need = self._intervals_per_cpi(
                 len(iv.samples) / self.plan.sample_rate_hz)

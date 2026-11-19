@@ -147,3 +147,49 @@ def test_a_transmitter_off_the_channel_centre_is_mixed_down(
     for ra, rb in zip(a, b):
         assert ra["group_range_km"] == rb["group_range_km"]
         assert ra["snr_db"] == pytest.approx(rb["snr_db"], abs=0.05)
+
+
+def _warns(caplog):
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_a_precise_position_runs_without_a_warning(
+        tmp_path, caplog, plan_and_txs, physics_settings, contiguous_intervals):
+    with caplog.at_level(logging.WARNING):
+        stop = _stop(plan_and_txs, physics_settings, tmp_path)
+        outs = [stop.feed(iv, lab) for iv, lab in contiguous_intervals]
+    assert _warns(caplog) == [] and outs[1].spots
+
+
+def test_a_six_character_grid_runs_with_one_warning(
+        tmp_path, caplog, plan_and_txs, physics_settings, contiguous_intervals):
+    s = dict(physics_settings, position_source="grid_centre")
+    with caplog.at_level(logging.WARNING):
+        stop = PhysicsStopgap(*plan_and_txs, settings=s, output_dir=tmp_path,
+                              reporter_id="AC0G/B4", radiod="b4", host_call="AC0G",
+                              host_grid="EM38ww")
+        outs = [stop.feed(iv, lab) for iv, lab in contiguous_intervals]
+    w = _warns(caplog)
+    assert len(w) == 1 and "AC0G/B4" in w[0] and "virtual height" in w[0]
+    assert outs[1].spots
+
+
+@pytest.mark.parametrize("src", ["grid_centre", "none"])
+def test_a_four_character_grid_or_no_position_runs_no_physics(
+        tmp_path, caplog, plan_and_txs, physics_settings, contiguous_intervals, src):
+    s = {k: v for k, v in physics_settings.items() if not k.startswith("receiver_")}
+    s["position_source"] = src
+    with caplog.at_level(logging.WARNING):
+        stop = _stop(plan_and_txs, s, tmp_path)
+        outs = [stop.feed(iv, lab) for iv, lab in contiguous_intervals]
+    assert len(_warns(caplog)) == 1
+    assert outs == [PhysicsOut([], []), PhysicsOut([], [])]
+    assert not list(tmp_path.rglob("*.jsonl"))
+
+
+def test_settings_without_a_position_are_refused(tmp_path, plan_and_txs, physics_settings):
+    s = {k: v for k, v in physics_settings.items() if not k.startswith("receiver_")}
+    with pytest.raises(ConfigError, match="receiver_lat"):
+        _stop(plan_and_txs, s, tmp_path)
+    with pytest.raises(ConfigError, match="position_source"):
+        _stop(plan_and_txs, {k: v for k, v in s.items() if k != "position_source"}, tmp_path)

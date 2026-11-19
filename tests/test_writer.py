@@ -173,3 +173,45 @@ def test_a_jsonl_failure_never_skips_the_sink(tmp_path):
     st = w.stats
     assert st["jsonl_failures"] == 1 and st["written"] == 2     # npy row + capture
     assert len(a.rows) == 2 and len(c.rows) == 1
+
+
+@pytest.mark.parametrize("how", ["none", "raises"])
+def test_a_spots_failure_keeps_the_arrival_and_capture_sinks(tmp_path, monkeypatch, caplog, how):
+    monkeypatch.setenv("HAMSCI_SINK_PATH", str(tmp_path / "sink.db"))
+
+    def bad():
+        if how == "raises":
+            raise RuntimeError("spots table broken")
+        return None
+    monkeypatch.setattr(wmod, "make_spots_writer", bad)
+    with caplog.at_level("WARNING"):
+        sinks = make_sink_writers()
+    assert sinks is not None and sinks[2] is None
+    assert [w.table for w in sinks[:2]] == ["arrival", "capture"]
+    assert any("codar.spots" in r.getMessage() for r in caplog.records)
+    for w in sinks[:2]:
+        w.close()
+
+
+def test_a_failure_after_the_first_writer_closes_it(monkeypatch):
+    import hs_uploader.sink as sink
+    built = []
+
+    def from_env(**kw):
+        if kw["table"] == "capture":
+            raise RuntimeError("no capture table")
+        built.append(FakeW())
+        return built[-1]
+    monkeypatch.setattr(sink.Writer, "from_env", staticmethod(from_env))
+    assert make_sink_writers() is None
+    assert built and all(w.closed for w in built)
+
+
+def test_rowwriter_skips_spots_when_its_spots_writer_is_none(tmp_path):
+    arr, cap = FakeW(), FakeW()
+    w = RowWriter(output_dir=tmp_path, sink_writers=(arr, cap, None), phase_store=None)
+    c, a = _rows()
+    w.put(c, a, [], spots=[{"time": "x"}, {"time": "y"}])
+    w.close()
+    assert arr.rows and cap.rows
+    assert w.stats["spots_skipped"] == 2 and w.stats["sink_failures"] == 0

@@ -301,7 +301,8 @@ def physics_settings():
     return dict(enabled=True, coherent_seconds=60, range_min_km=200, range_max_km=800,
                 snr_threshold_db=5.0, max_peaks_per_cpi=4, clutter_window=20,
                 interval_s=30, tdma_offset_samples={"TX1": 0},
-                receiver_lat=PHYS_RX[0], receiver_lon=PHYS_RX[1])
+                receiver_lat=PHYS_RX[0], receiver_lon=PHYS_RX[1],
+                position_source="precise")
 
 
 @pytest.fixture

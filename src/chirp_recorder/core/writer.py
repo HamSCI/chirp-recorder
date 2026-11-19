@@ -34,24 +34,37 @@ def make_sink_writers() -> Optional[tuple]:
 
     hs_uploader.sink.Writer, falling back to sigmond.hamsci_sink.  Rows land
     under producer chirp-recorder; spots go to codar.spots (mode "codar")."""
+    built: list = []
     try:
         try:
             from hs_uploader.sink import Writer  # type: ignore[import-not-found]
         except ImportError:
             from sigmond.hamsci_sink import Writer  # type: ignore[import-not-found]
-        arrival, capture = (
-            Writer.from_env(table=t, mode="sigmondb", schema_version=sr.SCHEMA_VERSION,
-                            producer="chirp-recorder", batch_rows=200)
-            for t in ("arrival", "capture"))
-        spots = make_spots_writer()
-        if spots is None:
-            return None
-        return arrival, capture, spots
+        for t in ("arrival", "capture"):
+            built.append(Writer.from_env(
+                table=t, mode="sigmondb", schema_version=sr.SCHEMA_VERSION,
+                producer="chirp-recorder", batch_rows=200))
     except ImportError:
         log.debug("no sink writer importable; sigmondb rows off")
+        return None
     except Exception as exc:  # noqa: BLE001
         log.warning("sink writer init failed (%s); JSONL unaffected", exc)
-    return None
+        for w in built:
+            try:
+                w.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return None
+    # A spots failure never takes the arrival and capture sinks with it.
+    try:
+        spots = make_spots_writer()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("spots writer init failed (%s); codar.spots rows off", exc)
+        spots = None
+    if spots is None:
+        log.warning("no codar.spots writer; physics rows go to JSONL only, "
+                    "arrival and capture sinks stay on")
+    return built[0], built[1], spots
 
 
 def _json_default(o):
@@ -119,7 +132,7 @@ class RowWriter(threading.Thread):
         self.phase_store = phase_store
         self._q: queue.Queue = queue.Queue(maxsize=queue_max)
         self._stats = {"written": 0, "sink_failures": 0, "queue_full": 0,
-                       "jsonl_failures": 0}
+                       "jsonl_failures": 0, "spots_skipped": 0}
         self._lock = threading.Lock()
         self._closed = False
         self._jsonl_lock = threading.Lock()
@@ -153,6 +166,8 @@ class RowWriter(threading.Thread):
         self._q.put(_STOP)           # the thread keeps draining, so this ends
         self.join()
         for w in self.sink_writers or ():
+            if w is None:
+                continue
             try:
                 w.close()
             except Exception as exc:  # noqa: BLE001
@@ -182,6 +197,9 @@ class RowWriter(threading.Thread):
         for writer, rows in ((w[0], arrivals), (w[1], [capture] if capture else []),
                              (w[2], spots)):
             if not rows:
+                continue
+            if writer is None:
+                self._bump("spots_skipped", len(rows))
                 continue
             try:
                 writer.insert(rows)
