@@ -23,7 +23,8 @@ class FakeRadiod:
     def __init__(self, *, rate=64_000, interval_s=1.0, input_rate=129_600_000,
                  olen=None, drop_packets_at_rtp=(), restart_at_rtp=None,
                  restart_base=5_000_000, start_rtp=0, total_s=8.0,
-                 queue_max=1000, roll_s=3600.0):
+                 queue_max=1000, roll_s=3600.0, poll_every=2,
+                 fit_wait_s=0.3):
         self.rate = rate
         self.input_rate = input_rate
         self.olen = olen or max(1, rate // 1000)          # output samples per block
@@ -38,28 +39,40 @@ class FakeRadiod:
         self.runs = [dict(base=start_rtp & MASK, input0=1_000_000_000, epoch=1.7e9),
                      dict(base=restart_base & MASK, input0=3_000_000_000, epoch=1.7e9 + 500.0)]
         self.current_run = 0
-        self.poll_n = [0, 0]
+        self.run_pos = 0               # run-relative position of the next packet
+        self.poll_every = poll_every   # a status poll before every Nth packet
+        self.removed: list[int] = []
+        self.closed = False
+        self.lifetimes: list[tuple] = []
         self.start_rtp = start_rtp
         self.ensure_calls: list[dict] = []
-        self.control = SimpleNamespace(ensure_channel=self._ensure,
-                                       poll_status=self._poll)
+        self.control = SimpleNamespace(
+            ensure_channel=self._ensure, poll_status=self._poll,
+            remove_channel=self.removed.append,
+            set_channel_lifetime=lambda ssrc, n: self.lifetimes.append((ssrc, n)),
+            close=self._close)
         self.stream_factory = self._factory
         self.plan = ChannelPlan(name="4.4630MHz", status="radiod.local",
                                 centre_hz=4.463e6, sample_rate_hz=rate, groups=())
         self.source = RawChannelSource(
             self.plan, interval_s=interval_s, control=self.control,
             stream_factory=self.stream_factory, queue_max=queue_max,
-            poll_spacing_s=0.0, roll_s=roll_s)
+            poll_period_s=None, poll_spacing_s=0.0, roll_s=roll_s,
+            fit_wait_s=fit_wait_s)
 
     # --- control ---------------------------------------------------------
     def _ensure(self, **kw):
         self.ensure_calls.append(kw)
         return SimpleNamespace(ssrc=0x1234, multicast_address="239.1.1.1", port=5004)
 
+    def _close(self):
+        self.closed = True
+
     def _poll(self, ssrc, timeout=2.0):
+        """Status as radiod holds it now: the RTP of the stream's current
+        position (floored to a block), on the current run's timeline."""
         run = self.runs[self.current_run]
-        blocks = -8 + self.poll_n[self.current_run]
-        self.poll_n[self.current_run] += 1
+        blocks = self.run_pos // self.olen
         inp = run["input0"] + blocks * self.ilen
         gps_ns = round((run["epoch"] + inp / self.input_rate) * 1e9)
         return SimpleNamespace(
@@ -75,26 +88,24 @@ class FakeRadiod:
             def start(self):
                 pos = 0
                 run = 0
+                npk = 0
                 while pos < outer.total:
                     if (run == 0 and outer.restart_at is not None
                             and outer.start_rtp + pos >= outer.restart_at):
                         run = 1
                         outer.current_run = 1
-                        run_pos = 0
-                    if run == 0:
-                        rtp = (outer.start_rtp + pos) & MASK
-                    else:
-                        rtp = (outer.runs[1]["base"] + run_pos) & MASK
+                        outer.run_pos = 0
+                    if outer.poll_every and npk % outer.poll_every == 0:
+                        outer.source.poll_once()
+                    npk += 1
+                    rtp = (outer.runs[run]["base"] + outer.run_pos) & MASK
                     n = min(outer.packet, outer.total - pos)
                     if rtp not in outer.drops:
-                        # sample value = position within its run: lets a test
-                        # check which samples an interval holds
-                        base = pos if run == 0 else run_pos
-                        s = (np.arange(n) + base).astype(np.float32).astype(np.complex64)
+                        # sample value = position within its run
+                        s = (np.arange(n) + outer.run_pos).astype(np.float32).astype(np.complex64)
                         on_packet(rtp, s)
                     pos += n
-                    if run == 1:
-                        run_pos += n
+                    outer.run_pos += n
 
             def stop(self):
                 pass
@@ -111,6 +122,16 @@ class Wrapper:
         out = list(islice(self.source.intervals(), n))
         self.source.stop()
         return out
+
+    def take_all(self, wait_s=0.4):
+        """Everything the source delivers from a finished recording."""
+        import threading
+        t = threading.Timer(wait_s, self.source.stop)
+        t.start()
+        try:
+            return list(self.source.intervals())
+        finally:
+            t.cancel()
 
     @property
     def stats(self):

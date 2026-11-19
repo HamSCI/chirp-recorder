@@ -146,3 +146,167 @@ def test_default_control_carries_the_client_id(monkeypatch):
     monkeypatch.setattr(ka9q.control, "RadiodControl", C)
     source_mod._make_control("radiod.local")
     assert seen == {"status": "radiod.local", "client_id": "chirp-recorder"}
+
+
+# --- fix round 1 -----------------------------------------------------------
+
+from types import SimpleNamespace
+
+from ka9q.stream_quality import GapSource
+
+RUN0_EPOCH, RUN1_EPOCH = 1.7e9, 1.7e9 + 500.0
+
+
+def test_status_pair_is_a_recent_poll_at_or_before(fake_radiod):
+    # polls follow the stream (one per 6400 samples), so the pair sits just
+    # before the interval, never 8 blocks before a stream that has not begun
+    src = fake_radiod(rate=64_000, interval_s=1.0, drop_packets_at_rtp=[96_000])
+    for iv in src.take(3):
+        age = s32(iv.first_rtp - iv.status_pair.rtp_timesnap)
+        assert 0 <= age <= 6_400
+
+
+def test_no_old_run_interval_carries_the_new_epoch(fake_radiod):
+    # the reviewer's repro: a gap, then a radiod restart
+    src = fake_radiod(rate=64_000, interval_s=1.0, drop_packets_at_rtp=[96_000],
+                      restart_at_rtp=300_000)
+    got = src.take_all()
+    old = [i for i in got if i.first_rtp < 1_000_000]
+    new = [i for i in got if i.first_rtp >= 1_000_000]
+    assert [i.first_rtp for i in old] == [0, 128_000, 192_000]
+    assert new, "the new run delivers"
+    for i in old:
+        assert abs(i.input_epoch_gps_s - RUN0_EPOCH) < 1.0
+        assert abs(i.first_input_index - (1_000_000_000 + i.first_rtp * 2025)) < 1
+        assert i.samples[0] == i.first_rtp
+    for i in new:
+        assert abs(i.input_epoch_gps_s - RUN1_EPOCH) < 1.0
+        assert abs(i.first_input_index
+                   - (3_000_000_000 + (i.first_rtp - 5_000_000) * 2025)) < 1
+        assert i.samples[0] == i.first_rtp - 5_000_000
+    assert src.stats["epochs"] == 2
+
+
+def test_interval_with_no_pair_at_or_before_is_discarded_not_stamped(fake_radiod, caplog):
+    # nothing can be polled before the first packet of a restarted run
+    caplog.set_level(logging.ERROR)
+    src = fake_radiod(rate=64_000, interval_s=1.0, restart_at_rtp=200_000)
+    got = src.take_all()
+    assert 5_000_000 not in [i.first_rtp for i in got]        # first run-1 interval
+    assert 5_064_000 in [i.first_rtp for i in got]
+    assert any("no status pair at or before rtp 5000000" in r.getMessage()
+               for r in caplog.records)
+    for i in got:
+        assert s32(i.first_rtp - i.status_pair.rtp_timesnap) >= 0
+
+
+def test_superseded_generation_without_a_map_is_discarded(fake_radiod, caplog):
+    caplog.set_level(logging.ERROR)
+    # no polls during the stream: generations 1 and 2 never get a map
+    src = fake_radiod(rate=64_000, interval_s=1.0, drop_packets_at_rtp=[96_000],
+                      restart_at_rtp=300_000, poll_every=0)
+    got = src.take_all()
+    assert [i.first_rtp for i in got] == [0]
+    assert src.stats["epochs"] == 1
+    # gen 0: intervals 0 (delivered); gen 1: 128k, 192k (superseded) and the
+    # restart's partial (counted at the restart); gen 2 waits then is refused
+    assert src.stats["discarded"] >= 6
+    assert any("superseded" in r.getMessage() for r in caplog.records)
+
+
+def test_restart_re_ensures_the_channel(fake_radiod):
+    src = fake_radiod(rate=64_000, interval_s=1.0, restart_at_rtp=200_000)
+    src.take_all()
+    assert len(src.fake.ensure_calls) == 2 and src.stats["restarts"] == 1
+    gap = fake_radiod(rate=64_000, interval_s=1.0, drop_packets_at_rtp=[96_000])
+    gap.take_all()
+    assert len(gap.fake.ensure_calls) == 1          # a gap leaves the channel alone
+
+
+def test_silence_re_ensures_the_channel(fake_radiod):
+    src = fake_radiod(rate=64_000, interval_s=1.0, poll_every=0)
+    import time
+    now = [time.monotonic()]
+    src.source._clock = lambda: now[0]
+    src.source._silence_s = 10.0
+    src.take(1)
+    src.source._started = True
+    src.source._stopped.clear()
+    before = len(src.fake.ensure_calls)
+    now[0] += 30.0
+    src.source.poll_once()
+    assert len(src.fake.ensure_calls) == before + 1
+
+
+def test_stop_removes_the_channel_and_closes_control(fake_radiod):
+    src = fake_radiod(rate=64_000, interval_s=1.0)
+    src.take(1)
+    assert src.fake.removed == [0x1234] and src.fake.closed
+    assert src.fake.ensure_calls[0]["lifetime"] == src.source.LIFETIME_FRAMES
+    src.source.stop()                                  # idempotent
+    assert src.fake.removed == [0x1234]
+
+
+def test_poller_refreshes_the_lifetime(fake_radiod):
+    src = fake_radiod(rate=64_000, interval_s=1.0)
+    src.take_all()
+    assert src.fake.lifetimes and src.fake.lifetimes[0] == (0x1234, 3000)
+
+
+# --- _KaStream (I4) ----------------------------------------------------------
+
+class _Cls:
+    def __init__(self, channel, on_samples):
+        self.on_samples = on_samples
+
+
+def _ka(log_calls):
+    from chirp_recorder.core.source import _KaStream
+    return _KaStream(None, lambda r, s: log_calls.append(("pkt", r, len(s))),
+                     lambda r, n, d: log_calls.append(("lost", r, n, tuple(d))),
+                     _stream_cls=_Cls)
+
+
+def _q(rtp0, start, gaps=()):
+    return SimpleNamespace(delivered_rtp_start=rtp0, batch_start_sample=start,
+                           batch_gaps=list(gaps))
+
+
+def _gap(src, pos, dur):
+    return SimpleNamespace(source=src, position_samples=pos, duration_samples=dur)
+
+
+def test_kastream_gap_costs_only_its_span():
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(np.zeros(1000, np.complex64),
+                   _q(5_000, 100, [_gap(GapSource.NETWORK_LOSS, 400, 200)]))
+    assert calls == [("pkt", 5_000, 300), ("lost", 5_300, 200, (200,)),
+                     ("pkt", 5_500, 500)]
+
+
+def test_kastream_empty_payload_condemns_nothing():
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(np.ones(640, np.complex64),
+                   _q(1_000, 0, [_gap(GapSource.EMPTY_PAYLOAD, 100, 320)]))
+    assert calls == [("pkt", 1_000, 640)]
+
+
+def test_kastream_missing_rtp_start_is_loud_and_never_synthesised(caplog):
+    caplog.set_level(logging.ERROR)
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(np.ones(100, np.complex64), _q(None, 0))       # nowhere to place it
+    assert calls == [] and "no delivered_rtp_start" in caplog.text
+    ka._on_samples(np.ones(100, np.complex64), _q(2_000, 0))
+    ka._on_samples(np.ones(100, np.complex64), _q(None, 100))
+    assert calls == [("pkt", 2_000, 100), ("lost", 2_100, 100, (100,))]
+
+
+def test_kastream_gap_outside_its_batch_condemns_the_batch():
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(np.ones(500, np.complex64),
+                   _q(3_000, 0, [_gap(GapSource.NETWORK_LOSS, 9_999, 50)]))
+    assert calls == [("lost", 3_000, 500, (50,))]
