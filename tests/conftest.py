@@ -143,3 +143,71 @@ def fake_radiod():
     def make(**kw):
         return Wrapper(FakeRadiod(**kw))
     return make
+
+
+# --- timing fixtures (Task 11); every value is made up -----------------------
+import json  # noqa: E402
+from types import SimpleNamespace as _NS  # noqa: E402
+
+from chirp_recorder.core.source import Interval, StatusPair  # noqa: E402
+
+ANCHOR_UPDATED_NS = 1_800_000_000 * 10**9          # file's updated_at (whole second)
+NOW = ANCHOR_UPDATED_NS + 10 * 10**9               # the test's "host clock": 10 s later
+ANCHOR_UTC = 1_800_000_000 * 10**9 - 123_456_789   # anchor_utc_ns
+ANCHOR_IDX = 4_000_000_000.0
+EPOCH_S = 1_799_999_000.25
+RATE_OUT = 64_000
+
+
+def _iso(ns):
+    import datetime as dt
+    return dt.datetime.fromtimestamp(ns // 10**9, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _doc(**over):
+    d = dict(radiod_status="b4-status.local", radiod_address="239.1.2.3",
+             anchor_input_index=ANCHOR_IDX, anchor_utc_ns=ANCHOR_UTC,
+             input_samprate=129_600_000, input_epoch_gps_s=EPOCH_S,
+             counter_epoch_id="epoch-7", u_epoch_ns=230.0, k=1.0, p=0.5,
+             a_level_provenance="measured", updated_at=_iso(ANCHOR_UPDATED_NS))
+    d.update(over)
+    return d
+
+
+@pytest.fixture
+def anchor_doc():
+    return _doc
+
+
+@pytest.fixture
+def anchor_file(tmp_path):
+    p = tmp_path / "t6-anchor.json"
+    p.write_text(json.dumps(_doc()))
+    return p
+
+
+def make_interval(*, first_rtp=1_000_000, idx=ANCHOR_IDX + 1_296_000.0, epoch=EPOCH_S,
+                  pair=None):
+    pair = pair or StatusPair(gps_time_ns=1_799_999_990 * 10**9 + 5_000,
+                              rtp_timesnap=900_000, output_samprate=RATE_OUT)
+    return Interval(samples=np.zeros(4, np.complex64), first_rtp=first_rtp,
+                    first_input_index=idx, input_samprate=129_600_000,
+                    input_epoch_gps_s=epoch, channel="4.4630MHz", status_pair=pair)
+
+
+@pytest.fixture
+def interval():
+    return make_interval()
+
+
+@pytest.fixture
+def interval_from_new_run():
+    return make_interval(epoch=EPOCH_S + 500.0)
+
+
+@pytest.fixture
+def fake_auth():
+    """A stand-in AuthorityReader: read() returns a snapshot that reads usable."""
+    snap = _NS(offset_usable=True, rtp_to_utc_offset_ns=-1_234_567, t_level_active="T3",
+               sigma_ns=2_500)
+    return _NS(sigma_ns=2_500, snapshot=snap, read=lambda: snap)
