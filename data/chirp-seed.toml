@@ -1,0 +1,1254 @@
+# CODAR transmitter seed for chirp-recorder.  Regenerate with
+# scripts/rebuild-seed.py from codar-sounder's data/codar-stations.toml
+# (HFRNet live list, 2026-11-08).  Do not edit.  No offsets live here.
+
+[transmitters.ACI1]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = 95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 34.0158
+lon = -119.359333
+
+[transmitters.AGL1]
+kind = "codar"
+centre_hz = 4450500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 34.576883
+lon = -120.649083
+
+[transmitters.AMAG]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 40.969333
+lon = -72.1237
+
+[transmitters.ANGL]
+kind = "codar"
+centre_hz = 41340000
+rate_hz_per_s = -2400003.416
+period_s = 0.25
+sweep_bw_hz = 600001.0
+lat = 37.853317
+lon = -122.4192
+
+[transmitters.ANWR]
+kind = "codar"
+centre_hz = 4450500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 28.111417
+lon = -96.7935
+
+[transmitters.ARG1]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 34.57695
+lon = -120.6505
+
+[transmitters.ASSA]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 38.205017
+lon = -75.1529
+
+[transmitters.BIGC]
+kind = "codar"
+centre_hz = 5262500
+rate_hz_per_s = -22057.64
+period_s = 1.0
+sweep_bw_hz = 22058.0
+lat = 37.088517
+lon = -122.2734
+
+[transmitters.BISL]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 41.152583
+lon = -71.551833
+
+[transmitters.BLCK]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 41.1528
+lon = -71.551183
+
+[transmitters.BML1]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -102935.654
+period_s = 0.5
+sweep_bw_hz = 51468.0
+lat = 38.317383
+lon = -123.072317
+
+[transmitters.BMLR]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 38.319533
+lon = -123.073617
+
+[transmitters.BRAD]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 40.195583
+lon = -74.00885
+
+[transmitters.BRAG]
+kind = "codar"
+centre_hz = 4785000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 39.438017
+lon = -123.816117
+
+[transmitters.BRIG]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 39.378367
+lon = -74.399017
+
+[transmitters.BRMR]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 39.378417
+lon = -74.398517
+
+[transmitters.BRVW]
+kind = "codar"
+centre_hz = 41500000
+rate_hz_per_s = -1198465.088
+period_s = 0.25
+sweep_bw_hz = 299616.0
+lat = 45.846967
+lon = -84.727333
+
+[transmitters.CAPE]
+kind = "codar"
+centre_hz = 26300000
+rate_hz_per_s = -801427.612
+period_s = 0.25
+sweep_bw_hz = 200357.0
+lat = 39.073767
+lon = -74.912367
+
+[transmitters.CBL1]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -47791.553
+period_s = 1.0
+sweep_bw_hz = 47792.0
+lat = 42.836667
+lon = -124.5655
+
+[transmitters.CDDO]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 18.101
+lon = -67.189683
+
+[transmitters.CEDR]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 37.6733
+lon = -75.593033
+
+[transmitters.CMPT]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 38.931267
+lon = -74.961333
+
+[transmitters.COP1]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = 95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 34.407467
+lon = -119.878783
+
+[transmitters.CRIS]
+kind = "codar"
+centre_hz = 41340000
+rate_hz_per_s = -2400606.444
+period_s = 0.25
+sweep_bw_hz = 600152.0
+lat = 37.806367
+lon = -122.465967
+
+[transmitters.DCLR]
+kind = "codar"
+centre_hz = 4450500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 35.217483
+lon = -120.862633
+
+[transmitters.DCSR]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 35.20245
+lon = -120.846083
+
+[transmitters.ESPT]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = 198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 42.58625
+lon = -70.650556
+
+[transmitters.ESTR]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 35.45975
+lon = -120.977633
+
+[transmitters.EXPL]
+kind = "codar"
+centre_hz = 43685000
+rate_hz_per_s = 2400606.444
+period_s = 0.25
+sweep_bw_hz = 600152.0
+lat = 37.8029
+lon = -122.3971
+
+[transmitters.FBK1]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = 95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 34.86975
+lon = -120.6212
+
+[transmitters.FLND]
+kind = "codar"
+centre_hz = 26251000
+rate_hz_per_s = -400713.808
+period_s = 0.25
+sweep_bw_hz = 100178.0
+lat = 36.919433
+lon = -76.053917
+
+[transmitters.FOCF]
+kind = "codar"
+centre_hz = 26310320
+rate_hz_per_s = 882305.596
+period_s = 0.25
+sweep_bw_hz = 220576.0
+lat = 42.159917
+lon = -70.704883
+
+[transmitters.FORT]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -600007.996
+period_s = 0.25
+sweep_bw_hz = 150002.0
+lat = 37.712267
+lon = -122.501317
+
+[transmitters.FRDO]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 18.386467
+lon = -65.6193
+
+[transmitters.FTMK]
+kind = "codar"
+centre_hz = 41500000
+rate_hz_per_s = -1198465.088
+period_s = 0.25
+sweep_bw_hz = 299616.0
+lat = 45.7864
+lon = -84.736833
+
+[transmitters.GCAP]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 40.98255
+lon = -73.623783
+
+[transmitters.GCVE]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -102935.654
+period_s = 0.5
+sweep_bw_hz = 51468.0
+lat = 38.567183
+lon = -123.33155
+
+[transmitters.GCYN]
+kind = "codar"
+centre_hz = 16150000
+rate_hz_per_s = -102935.654
+period_s = 0.5
+sweep_bw_hz = 51468.0
+lat = 36.439983
+lon = -121.922483
+
+[transmitters.GPTP]
+kind = "codar"
+centre_hz = 24549930
+rate_hz_per_s = -301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 30.347783
+lon = -89.086983
+
+[transmitters.HAUL]
+kind = "codar"
+centre_hz = 13449900
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 25.910667
+lon = -80.12165
+
+[transmitters.HBSP]
+kind = "codar"
+centre_hz = 4450500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 30.383217
+lon = -86.433817
+
+[transmitters.HEMP]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 40.586783
+lon = -73.589817
+
+[transmitters.HILL]
+kind = "codar"
+centre_hz = 13449900
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 26.26245
+lon = -80.08035
+
+[transmitters.HLGT]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 39.532033
+lon = -74.262133
+
+[transmitters.HLPN]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -801427.612
+period_s = 0.25
+sweep_bw_hz = 200357.0
+lat = 38.794033
+lon = -75.089183
+
+[transmitters.HOOK]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 40.4301
+lon = -73.983583
+
+[transmitters.KAL1]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -47791.553
+period_s = 1.0
+sweep_bw_hz = 47792.0
+lat = 47.566983
+lon = -124.36175
+
+[transmitters.KBCH]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 60.463883
+lon = -151.28195
+
+[transmitters.LEWE]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -801427.612
+period_s = 0.25
+sweep_bw_hz = 200357.0
+lat = 38.781783
+lon = -75.12825
+
+[transmitters.LISL]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 36.691717
+lon = -75.922633
+
+[transmitters.LOO1]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -47791.553
+period_s = 1.0
+sweep_bw_hz = 47792.0
+lat = 46.4332
+lon = -124.058817
+
+[transmitters.LOVE]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 39.736233
+lon = -74.11705
+
+[transmitters.LUIS]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 35.160817
+lon = -120.758317
+
+[transmitters.MABO]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -47791.553
+period_s = 1.0
+sweep_bw_hz = 47792.0
+lat = 17.988133
+lon = -65.885
+
+[transmitters.MAN1]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 45.640317
+lon = -123.941817
+
+[transmitters.MARA]
+kind = "codar"
+centre_hz = 5262500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 24.740133
+lon = -80.9833
+
+[transmitters.MBAC]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 36.903017
+lon = -121.843033
+
+[transmitters.MBNP]
+kind = "codar"
+centre_hz = 4450500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 28.604383
+lon = -95.961283
+
+[transmitters.MCPK]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -602908.812
+period_s = 0.25
+sweep_bw_hz = 150727.0
+lat = 29.744533
+lon = -94.828667
+
+[transmitters.MGS1]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 34.204917
+lon = -119.251633
+
+[transmitters.MISQ]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 41.322933
+lon = -71.804217
+
+[transmitters.MLML]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 36.80395
+lon = -121.787983
+
+[transmitters.MOLA]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -602908.812
+period_s = 0.25
+sweep_bw_hz = 150727.0
+lat = 29.4457
+lon = -94.917083
+
+[transmitters.MONT]
+kind = "codar"
+centre_hz = 16150000
+rate_hz_per_s = -102935.654
+period_s = 0.5
+sweep_bw_hz = 51468.0
+lat = 37.533717
+lon = -122.519217
+
+[transmitters.MRCH]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 40.788183
+lon = -72.74525
+
+[transmitters.NANT]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 41.25045
+lon = -69.974067
+
+[transmitters.NAPL]
+kind = "codar"
+centre_hz = 5262500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 26.163117
+lon = -81.810667
+
+[transmitters.NAUS]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 41.844217
+lon = -69.947233
+
+[transmitters.NIC1]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 34.042333
+lon = -118.915367
+
+[transmitters.OBSP]
+kind = "codar"
+centre_hz = 4450500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 30.249433
+lon = -87.66845
+
+[transmitters.OCRA]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 35.103
+lon = -75.960433
+
+[transmitters.OLDB]
+kind = "codar"
+centre_hz = 26300000
+rate_hz_per_s = -801427.612
+period_s = 0.25
+sweep_bw_hz = 200357.0
+lat = 40.4574
+lon = -74.251983
+
+[transmitters.PAFS]
+kind = "codar"
+centre_hz = 4460000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 38.928433
+lon = -123.727767
+
+[transmitters.PBON]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -599232.544
+period_s = 0.25
+sweep_bw_hz = 149808.0
+lat = 37.815483
+lon = -122.5299
+
+[transmitters.PCYC]
+kind = "codar"
+centre_hz = 24550110
+rate_hz_per_s = -301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 30.312233
+lon = -89.2415
+
+[transmitters.PILR]
+kind = "codar"
+centre_hz = 4475500
+rate_hz_per_s = -22057.64
+period_s = 1.0
+sweep_bw_hz = 22058.0
+lat = 37.49675
+lon = -122.499367
+
+[transmitters.PINS]
+kind = "codar"
+centre_hz = 4450500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 27.42255
+lon = -97.299517
+
+[transmitters.PLPI]
+kind = "codar"
+centre_hz = 43675000
+rate_hz_per_s = -1198465.088
+period_s = 0.25
+sweep_bw_hz = 299616.0
+lat = 29.865083
+lon = -93.923783
+
+[transmitters.PMGC]
+kind = "codar"
+centre_hz = 4475500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 26.660283
+lon = -97.454983
+
+[transmitters.PORT]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -801427.612
+period_s = 0.25
+sweep_bw_hz = 200357.0
+lat = 40.4413
+lon = -74.099333
+
+[transmitters.PPNS]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 36.636717
+lon = -121.934983
+
+[transmitters.PREY]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -102935.654
+period_s = 0.5
+sweep_bw_hz = 51468.0
+lat = 38.04715
+lon = -122.989133
+
+[transmitters.PSLR]
+kind = "codar"
+centre_hz = 4475000
+rate_hz_per_s = -22057.64
+period_s = 1.0
+sweep_bw_hz = 22058.0
+lat = 36.306233
+lon = -121.9013
+
+[transmitters.PTC1]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = 95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 34.448667
+lon = -120.47165
+
+[transmitters.PTM1]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 34.096033
+lon = -119.106983
+
+[transmitters.PTWN]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = 198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 42.078833
+lon = -70.220333
+
+[transmitters.PYFC]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 17.962767
+lon = -66.618333
+
+[transmitters.RAGG]
+kind = "codar"
+centre_hz = 4450500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 35.787367
+lon = -121.33625
+
+[transmitters.RDSR]
+kind = "codar"
+centre_hz = 5262500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 27.8328
+lon = -82.834633
+
+[transmitters.RFG1]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 34.461083
+lon = -120.076983
+
+[transmitters.RTC1]
+kind = "codar"
+centre_hz = 41340000
+rate_hz_per_s = -2404282.716
+period_s = 0.25
+sweep_bw_hz = 601071.0
+lat = 37.8899
+lon = -122.445933
+
+[transmitters.SAUS]
+kind = "codar"
+centre_hz = 41340000
+rate_hz_per_s = -2400606.444
+period_s = 0.25
+sweep_bw_hz = 600152.0
+lat = 37.84395
+lon = -122.4772
+
+[transmitters.SBAY]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 18.475067
+lon = -66.139783
+
+[transmitters.SBSR]
+kind = "codar"
+centre_hz = 5262500
+rate_hz_per_s = 25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 42.828883
+lon = -70.8145
+
+[transmitters.SCCI]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 33.446867
+lon = -118.478217
+
+[transmitters.SCDB]
+kind = "codar"
+centre_hz = 26300000
+rate_hz_per_s = -301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 34.0333
+lon = -118.7337
+
+[transmitters.SCDH]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 33.943233
+lon = -118.442383
+
+[transmitters.SCI1]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = 95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 33.994667
+lon = -119.632033
+
+[transmitters.SCNB]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 33.606
+lon = -117.931417
+
+[transmitters.SCPF]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 33.704867
+lon = -118.293983
+
+[transmitters.SCRZ]
+kind = "codar"
+centre_hz = 16150000
+rate_hz_per_s = -102935.654
+period_s = 0.5
+sweep_bw_hz = 51468.0
+lat = 36.948283
+lon = -122.065933
+
+[transmitters.SCTB]
+kind = "codar"
+centre_hz = 26300000
+rate_hz_per_s = 301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 33.811683
+lon = -118.391433
+
+[transmitters.SDBP]
+kind = "codar"
+centre_hz = 24600230
+rate_hz_per_s = -198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 32.535917
+lon = -117.1231
+
+[transmitters.SDCP]
+kind = "codar"
+centre_hz = 25400000
+rate_hz_per_s = 202195.038
+period_s = 0.5
+sweep_bw_hz = 101098.0
+lat = 33.257733
+lon = -117.4368
+
+[transmitters.SDDP]
+kind = "codar"
+centre_hz = 25600000
+rate_hz_per_s = -198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 33.460683
+lon = -117.706683
+
+[transmitters.SDPD]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 60.1125
+lon = -151.576383
+
+[transmitters.SDPL]
+kind = "codar"
+centre_hz = 24600000
+rate_hz_per_s = -198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 32.665833
+lon = -117.239583
+
+[transmitters.SDSC]
+kind = "codar"
+centre_hz = 5420000
+rate_hz_per_s = -51467.827
+period_s = 1.0
+sweep_bw_hz = 51468.0
+lat = 32.91775
+lon = -118.4869
+
+[transmitters.SDSE]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 33.024483
+lon = -117.286133
+
+[transmitters.SDSL]
+kind = "codar"
+centre_hz = 4647000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 32.8694
+lon = -117.2532
+
+[transmitters.SDSN]
+kind = "codar"
+centre_hz = 4480000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 33.029817
+lon = -118.597117
+
+[transmitters.SDUT]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 33.3882
+lon = -117.5955
+
+[transmitters.SDWW]
+kind = "codar"
+centre_hz = 26310000
+rate_hz_per_s = -198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 32.679917
+lon = -117.247417
+
+[transmitters.SEAB]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 40.366817
+lon = -73.973517
+
+[transmitters.SGRV]
+kind = "codar"
+centre_hz = 4450500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 30.3339
+lon = -88.568567
+
+[transmitters.SHEL]
+kind = "codar"
+centre_hz = 4785000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 40.033367
+lon = -124.078867
+
+[transmitters.SILD]
+kind = "codar"
+centre_hz = 26300000
+rate_hz_per_s = -801427.612
+period_s = 0.25
+sweep_bw_hz = 200357.0
+lat = 40.543633
+lon = -74.124533
+
+[transmitters.SLID]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -102935.654
+period_s = 0.5
+sweep_bw_hz = 51468.0
+lat = 37.872433
+lon = -122.597717
+
+[transmitters.SMPT]
+kind = "codar"
+centre_hz = 24550000
+rate_hz_per_s = -602908.812
+period_s = 0.25
+sweep_bw_hz = 150727.0
+lat = 29.546417
+lon = -94.7881
+
+[transmitters.SNI1]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 33.280083
+lon = -119.522333
+
+[transmitters.SOB2]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = 198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 41.350183
+lon = -70.526584
+
+[transmitters.SPRK]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 39.9325
+lon = -74.07255
+
+[transmitters.SSD1]
+kind = "codar"
+centre_hz = 13525000
+rate_hz_per_s = -95583.106
+period_s = 0.5
+sweep_bw_hz = 47792.0
+lat = 34.419033
+lon = -119.596133
+
+[transmitters.SSDE]
+kind = "codar"
+centre_hz = 4450500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 29.007967
+lon = -95.214917
+
+[transmitters.STLI]
+kind = "codar"
+centre_hz = 26310000
+rate_hz_per_s = -301454.406
+period_s = 0.5
+sweep_bw_hz = 150727.0
+lat = 40.90875
+lon = -73.587283
+
+[transmitters.SUNS]
+kind = "codar"
+centre_hz = 26251000
+rate_hz_per_s = -400713.808
+period_s = 0.25
+sweep_bw_hz = 100178.0
+lat = 37.1379
+lon = -75.972133
+
+[transmitters.THOM]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 18.30765
+lon = -64.957067
+
+[transmitters.VENI]
+kind = "codar"
+centre_hz = 5262500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 27.077617
+lon = -82.451633
+
+[transmitters.VIEW]
+kind = "codar"
+centre_hz = 26251000
+rate_hz_per_s = -400713.808
+period_s = 0.25
+sweep_bw_hz = 100178.0
+lat = 36.949933
+lon = -76.243183
+
+[transmitters.WAIN]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 70.643367
+lon = -160.02705
+
+[transmitters.WEST]
+kind = "codar"
+centre_hz = 5262500
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 24.552467
+lon = -81.766633
+
+[transmitters.WILD]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 38.94215
+lon = -74.886117
+
+[transmitters.WIN1]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -47791.553
+period_s = 1.0
+sweep_bw_hz = 47792.0
+lat = 43.665833
+lon = -124.2065
+
+[transmitters.WLD2]
+kind = "codar"
+centre_hz = 12232360
+rate_hz_per_s = -150727.204
+period_s = 0.5
+sweep_bw_hz = 75364.0
+lat = 44.383833
+lon = -124.089667
+
+[transmitters.WOOD]
+kind = "codar"
+centre_hz = 13475000
+rate_hz_per_s = -99259.376
+period_s = 0.5
+sweep_bw_hz = 49630.0
+lat = 38.99095
+lon = -74.799
+
+[transmitters.WSH1]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 44.1615
+lon = -124.1175
+
+[transmitters.WSP1]
+kind = "codar"
+centre_hz = 4463000
+rate_hz_per_s = -47791.553
+period_s = 1.0
+sweep_bw_hz = 47792.0
+lat = 46.902733
+lon = -124.13155
+
+[transmitters.YHL1]
+kind = "codar"
+centre_hz = 4785000
+rate_hz_per_s = -25733.913
+period_s = 1.0
+sweep_bw_hz = 25734.0
+lat = 44.676167
+lon = -124.077167
+
+[transmitters.YHS2]
+kind = "codar"
+centre_hz = 13500000
+rate_hz_per_s = -198518.754
+period_s = 0.5
+sweep_bw_hz = 99259.0
+lat = 44.674017
+lon = -124.075567
