@@ -48,11 +48,11 @@ class ChannelCost:
 
 
 def _psi_avg60(path: Path) -> float:
-    """The `some` line's avg60; a missing file reads 0.0 (logged at DEBUG)."""
+    """The `some` line's avg60; a missing file reads 0.0 (logged at WARNING)."""
     try:
         text = path.read_text()
     except OSError:
-        log.debug("no pressure file %s; reading 0.0", path)
+        log.warning("no pressure file %s; reading 0.0", path)
         return 0.0
     for line in text.splitlines():
         if line.startswith("some "):
@@ -89,13 +89,20 @@ def _unit_memory_max(cgroup: Path) -> Optional[int]:
     return None if raw == "max" or not raw.isdigit() else int(raw)
 
 
+def _online_cpus() -> int:
+    try:
+        return len(os.sched_getaffinity(0)) or 1
+    except (AttributeError, OSError):
+        return os.cpu_count() or 1
+
+
 def read_headroom(proc: Path = Path("/proc"), cgroup: Optional[Path] = None) -> Headroom:
     if cgroup is None:
         cgroup = _own_cgroup()
     meminfo = (proc / "meminfo").read_text()
     load1 = float((proc / "loadavg").read_text().split()[0])
     return Headroom(
-        online_cpus=os.cpu_count() or 1,
+        online_cpus=_online_cpus(),
         load1=load1,
         cpu_psi_some_avg60=_psi_avg60(proc / "pressure" / "cpu"),
         mem_psi_some_avg60=_psi_avg60(proc / "pressure" / "memory"),
@@ -112,6 +119,10 @@ def load_costs(path: Optional[Path] = None) -> dict[str, dict[int, tuple[float, 
     for version, body in doc.get("versions", {}).items():
         rates = {int(rate): (float(row["cores"]), int(row["mem_mib"]) << 20)
                  for rate, row in body.get("rates", {}).items()}
+        placeholders = [r for r, row in body.get("rates", {}).items()
+                        if not row.get("measured_at")]
+        for r in placeholders:
+            rates.pop(int(r), None)
         if rates:
             out[version] = rates
     return out
@@ -181,8 +192,16 @@ def admit(plans: list[ChannelPlan], head: Headroom, costs: dict, version: str, *
         if cost is None:
             if admitted:
                 refused.append((plan, f"no measured cost for chirp-recorder {version}"))
+            elif head.load1 > head.online_cpus - limits["spare_cores"]:
+                refused.append((plan, f"cpu headroom: load {head.load1:.2f} exceeds "
+                                      f"{head.online_cpus} CPUs less "
+                                      f"{limits['spare_cores']:g} spare"))
+            elif head.mem_available < limits["mem_floor_fraction"] * head.mem_total:
+                refused.append((plan, "memory headroom: free memory is below "
+                                      f"{limits['mem_floor_fraction']:.0%} of total"))
             else:
                 admitted.append(plan)   # the first plan opens, so it can be measured
+                estimated = True
             continue
         c, m = cores + cost.cores, mem + cost.mem_bytes
         if head.load1 + c > head.online_cpus - limits["spare_cores"]:

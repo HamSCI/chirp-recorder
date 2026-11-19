@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from chirp_recorder import __version__  # noqa: F401  (re-exported)
+
 _REPO_ROOT = Path(__file__).resolve().parent
 
 

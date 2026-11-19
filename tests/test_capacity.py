@@ -109,7 +109,7 @@ def test_measuring_switch_still_refuses_nothing_even_when_hot():
 def test_to_dict_shape():
     d = admit(_plans(2), CALM, {}, "0.1.0").to_dict()
     assert d["admitted"] == [_plans(2)[0].name] and d["refused"][0][0] == _plans(2)[1].name
-    assert d["estimated"] is False
+    assert d["estimated"] is True
     assert isinstance(d["refused"][0], list) and len(d["refused"][0]) == 2
     assert set(d) == {"admitted", "refused", "estimated"}
 
@@ -162,3 +162,35 @@ def test_read_headroom_max_and_missing_psi(tmp_path):
 def test_read_headroom_no_cgroup_files(tmp_path):
     _fake_proc(tmp_path / "proc")
     assert read_headroom(tmp_path / "proc", tmp_path / "nowhere").unit_memory_max is None
+
+
+def test_unmeasured_first_plan_is_estimated_when_calm():
+    a = admit(_plans(2), CALM, {}, "0.1.0")
+    assert len(a.admitted) == 1 and a.estimated
+
+
+def test_unmeasured_first_plan_refused_on_loaded_box():
+    busy = Headroom(8, 7.5, 1.0, 0.0, 16 * GiB, 10 * GiB, 2 * GiB)
+    a = admit(_plans(2), busy, {}, "0.1.0")
+    assert not a.admitted and "load" in a.refused[0][1]
+
+
+def test_placeholder_cost_row_is_skipped(tmp_path):
+    p = tmp_path / "costs.toml"
+    p.write_text('[versions."0.1.0".rates."64000"]\ncores = 0.0\nmem_mib = 0\n'
+                 'measured_on = ""\nmeasured_at = ""\n')
+    assert load_costs(p) == {}
+
+
+def test_missing_psi_logs_warning(tmp_path, caplog):
+    _fake_proc(tmp_path / "proc", omit_psi=True)
+    with caplog.at_level("WARNING"):
+        read_headroom(tmp_path / "proc", tmp_path)
+    assert any("pressure" in r.getMessage() and r.levelname == "WARNING"
+               for r in caplog.records)
+
+
+def test_version_reexported():
+    import chirp_recorder
+    from chirp_recorder import version
+    assert version.__version__ == chirp_recorder.__version__
