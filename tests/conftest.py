@@ -157,6 +157,13 @@ ANCHOR_UTC = 1_800_000_000 * 10**9 - 123_456_789   # anchor_utc_ns
 ANCHOR_IDX = 4_000_000_000.0
 EPOCH_S = 1_799_999_000.25
 RATE_OUT = 64_000
+GPS_EPOCH_UNIX_S = 315_964_800     # 1980-01-06 in Unix seconds
+GPS_MINUS_UTC_S = 18               # the test's leap-second count, used to build GPS-scale values
+
+
+def gps_ns_from_unix_ns(unix_ns):
+    """What radiod's GPS_TIME would read at this UTC instant (GPS-epoch scale)."""
+    return unix_ns - (GPS_EPOCH_UNIX_S - GPS_MINUS_UTC_S) * 10**9
 
 
 def _iso(ns):
@@ -188,7 +195,7 @@ def anchor_file(tmp_path):
 
 def make_interval(*, first_rtp=1_000_000, idx=ANCHOR_IDX + 1_296_000.0, epoch=EPOCH_S,
                   pair=None):
-    pair = pair or StatusPair(gps_time_ns=1_799_999_990 * 10**9 + 5_000,
+    pair = pair or StatusPair(gps_time_ns=gps_ns_from_unix_ns(1_799_999_990 * 10**9 + 5_000),
                               rtp_timesnap=900_000, output_samprate=RATE_OUT)
     return Interval(samples=np.zeros(4, np.complex64), first_rtp=first_rtp,
                     first_input_index=idx, input_samprate=129_600_000,

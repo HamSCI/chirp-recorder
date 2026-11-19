@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from chirp_recorder.core.timing import Label, Tie, chain_delay_from_env, normalise_status
 from chirp_recorder.core.source import StatusPair
-from conftest import ANCHOR_IDX, ANCHOR_UTC, NOW, make_interval
+from conftest import ANCHOR_IDX, ANCHOR_UTC, NOW, gps_ns_from_unix_ns, make_interval
 
 IN = 129_600_000
 
@@ -14,7 +14,7 @@ def radiod_utc(iv):
     p = iv.status_pair
     d = (iv.first_rtp - p.rtp_timesnap) & 0xFFFFFFFF
     d = d - 2**32 if d >= 2**31 else d
-    return p.gps_time_ns + round(d * 1e9 / p.output_samprate)
+    return p.gps_time_ns + (315_964_800 - 18) * 10**9 + round(d * 1e9 / p.output_samprate)
 
 
 def tie(path, **kw):
@@ -122,17 +122,17 @@ def test_authority_read_none_gives_radiod(tmp_path, interval):
 
 
 def test_rtp_wrap_in_radiod_arithmetic(tmp_path):
-    pair = StatusPair(gps_time_ns=1_799_999_990 * 10**9, rtp_timesnap=0xFFFFFF00,
+    pair = StatusPair(gps_time_ns=gps_ns_from_unix_ns(1_799_999_990 * 10**9), rtp_timesnap=0xFFFFFF00,
                       output_samprate=64_000)
     iv = make_interval(first_rtp=0x100, pair=pair)       # 0x200 = 512 samples past the snapshot
     assert tie(tmp_path / "x").label(iv).utc_ns == 1_799_999_990 * 10**9 + 512 * 1_000_000_000 // 64_000
-    pair2 = StatusPair(gps_time_ns=1_799_999_990 * 10**9, rtp_timesnap=0x100, output_samprate=64_000)
+    pair2 = StatusPair(gps_time_ns=gps_ns_from_unix_ns(1_799_999_990 * 10**9), rtp_timesnap=0x100, output_samprate=64_000)
     iv2 = make_interval(first_rtp=0xFFFFFF00, pair=pair2)  # 512 samples before it
     assert tie(tmp_path / "x").label(iv2).utc_ns == 1_799_999_990 * 10**9 - 512 * 1_000_000_000 // 64_000
 
 
 def test_integer_ns_precision_in_radiod_arithmetic(tmp_path):
-    pair = StatusPair(gps_time_ns=1_799_999_990_000_000_001, rtp_timesnap=0, output_samprate=64_000)
+    pair = StatusPair(gps_time_ns=gps_ns_from_unix_ns(1_799_999_990_000_000_001), rtp_timesnap=0, output_samprate=64_000)
     iv = make_interval(first_rtp=1, pair=pair)
     assert tie(tmp_path / "x").label(iv).utc_ns == 1_799_999_990_000_000_001 + 15_625
 
@@ -149,3 +149,67 @@ def test_chain_delay_from_env(tmp_path):
 def test_label_is_frozen(anchor_file, interval):
     lab = tie(anchor_file).label(interval)
     assert isinstance(lab, Label)
+
+
+def test_radiod_label_lands_on_the_right_utc_date(tmp_path):
+    # radiod reads 1451260818 s of GPS time at 2026-01-01T00:00:00Z (Unix 1767225600).
+    pair = StatusPair(gps_time_ns=1_451_260_818 * 10**9, rtp_timesnap=0, output_samprate=64_000)
+    lab = tie(tmp_path / "x").label(make_interval(first_rtp=0, pair=pair))
+    assert lab.utc_ns == 1_767_225_600 * 10**9
+
+
+def test_radiod_arithmetic_matches_ka9q_rtp_to_utc(tmp_path):
+    from ka9q.discovery import ChannelInfo
+    from ka9q.rtp_recorder import rtp_to_utc
+    gps = gps_ns_from_unix_ns(1_799_999_990 * 10**9 + 123_456_789)
+    pair = StatusPair(gps_time_ns=gps, rtp_timesnap=900_000, output_samprate=64_000)
+    ci = ChannelInfo(ssrc=1, preset="iq", sample_rate=64_000, frequency=4.463e6, snr=0.0,
+                     multicast_address="239.1.1.1", port=5004, gps_time=gps, rtp_timesnap=900_000)
+    for rtp in (1_000_000, 900_000 + 2**30, 900_000 - 2**30):   # both sides of the snapshot
+        iv = make_interval(first_rtp=rtp & 0xFFFFFFFF, pair=pair)
+        want = rtp_to_utc(rtp & 0xFFFFFFFF, ci, wallclock_hint_sec=1_799_999_990.0)
+        assert abs(tie(tmp_path / "x").label(iv).utc_ns / 1e9 - want) < 1e-6
+
+
+def test_epochs_1p5_s_apart_are_the_same_run(anchor_file, interval):
+    from conftest import EPOCH_S
+    lab = tie(anchor_file).label(dataclasses.replace(interval, input_epoch_gps_s=EPOCH_S + 1.5))
+    assert lab.delay_basis == "t6"
+
+
+def test_mismatch_logs_on_each_change_of_state(anchor_file, anchor_doc, interval, caplog):
+    t = tie(anchor_file, radiod_status="b1b-status.local")
+    with caplog.at_level(logging.INFO):
+        t.label(interval)
+        t.label(interval)
+        n1 = len(caplog.records)
+        anchor_file.write_text(json.dumps(anchor_doc(radiod_status="b2-status.local")))
+        t.label(interval)
+        t.label(interval)
+    assert n1 == 1 and len(caplog.records) == 2
+
+
+def test_t6_returning_is_logged(anchor_file, interval, caplog):
+    t = tie(anchor_file)
+    other = dataclasses.replace(interval, input_epoch_gps_s=0.0)
+    with caplog.at_level(logging.INFO):
+        t.label(interval); t.label(other); t.label(other); t.label(interval)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert len(msgs) == 2 and "another run" in msgs[0] and "applies again" in msgs[1]
+
+
+def test_authority_read_failure_warns_once(tmp_path, interval, caplog):
+    def boom():
+        raise OSError("gone")
+    t = tie(tmp_path / "x", authority=SimpleNamespace(read=boom))
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert t.label(interval).delay_basis == "radiod"
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def test_normalise_trailing_dot_and_ipv6():
+    assert normalise_status("b4-status.local.") == "b4-status"
+    assert normalise_status("ff02::1") != normalise_status("ff02::2")
+    assert normalise_status("[ff02::1]:5006") == "ff02::1"
+    assert normalise_status("192.168.1.5:5006") == "192.168.1.5"

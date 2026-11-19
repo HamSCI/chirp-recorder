@@ -29,11 +29,22 @@ from typing import Optional
 from hamsci_dsp.sigmondb_rows import provenance
 from hamsci_dsp.t6_anchor import ANCHOR_PATH, read_t6_anchor
 
+# The GPS-to-UTC step ka9q-python's rtp_to_utc applies (rtp_recorder.py:204:
+# gps_time + BILLION * (GPS_UTC_OFFSET - GPS_LEAP_SECONDS)).  Imported, not
+# copied, so a leap-second change in ka9q-python reaches this client.
+from ka9q.rtp_recorder import GPS_LEAP_SECONDS, GPS_UTC_OFFSET
+
 from chirp_recorder.core.source import Interval, _s32
 
 log = logging.getLogger(__name__)
 
 COORDINATION_ENV = Path("/etc/sigmond/coordination.env")
+
+# Same-run tolerance for the counter epoch.  hf-timestd allows 2.0 s
+# (COUNTER_EPOCH_SKEW_ALLOWANCE_S, counter_epoch_tracker.py:70) because
+# radiod's GPS_TIME arrives up to 816 ms late on B4, so two readers' least-late
+# epochs differ by that much within one run.
+SAME_RUN_TOL_S = 2.0
 
 
 @dataclass(frozen=True)
@@ -46,13 +57,20 @@ class Label:
 
 
 def normalise_status(name: str) -> str:
-    """Lower case, port dropped, trailing `.local` dropped."""
+    """Lower case, port dropped, trailing dot and `.local` dropped.  An IPv6
+    literal keeps all its groups (`[v6]:port` loses only the port)."""
     n = (name or "").strip().lower()
-    if ":" in n:
-        n = n.rsplit(":", 1)[0] if n.rsplit(":", 1)[1].isdigit() else n
+    if n.startswith("["):
+        end = n.find("]")
+        n = n[1:end] if end > 0 else n
+    elif n.count(":") == 1:
+        host, port = n.split(":")
+        if port.isdigit():
+            n = host
+    n = n.rstrip(".")
     if n.endswith(".local"):
         n = n[: -len(".local")]
-    return n
+    return n.rstrip(".")
 
 
 def _env_key(radiod_id: str) -> str:
@@ -82,7 +100,8 @@ def chain_delay_from_env(radiod_id: str, path: Path = COORDINATION_ENV) -> Optio
 def _radiod_utc_ns(iv: Interval) -> int:
     p = iv.status_pair
     delta = _s32(iv.first_rtp - p.rtp_timesnap)
-    return p.gps_time_ns + round(delta * 1_000_000_000 / p.output_samprate)
+    utc_at_snap = p.gps_time_ns + 1_000_000_000 * (GPS_UTC_OFFSET - GPS_LEAP_SECONDS)
+    return utc_at_snap + round(delta * 1_000_000_000 / p.output_samprate)
 
 
 class Tie:
@@ -94,28 +113,34 @@ class Tie:
         self.authority = authority
         self.chain_delay_ns = chain_delay_ns
         self.clock_ns = clock_ns
-        self._mismatch_logged: set = set()
+        self._state: dict = {}          # channel -> last T6 verdict
+        self._auth_failed = False
 
-    def _log_once(self, iv: Interval, kind: str, msg: str, *args) -> None:
-        key = (iv.channel, kind)
-        if key not in self._mismatch_logged:
-            self._mismatch_logged.add(key)
-            log.info(msg, *args)
+    def _note(self, iv: Interval, state, msg: str = "", *args) -> None:
+        """Log INFO when a channel's T6 verdict changes; say nothing otherwise."""
+        if self._state.get(iv.channel) != state:
+            prev = self._state.get(iv.channel)
+            self._state[iv.channel] = state
+            if msg:
+                log.info(msg, *args)
+            elif prev is not None:
+                log.info("channel %s: T6 anchor applies again", iv.channel)
 
     def label(self, iv: Interval) -> Label:
         anchor = read_t6_anchor(self.anchor_path, now_ns=self.clock_ns())
         if anchor is not None:
             mine, theirs = normalise_status(self.radiod_status), normalise_status(anchor.radiod_status)
             if mine != theirs:
-                self._log_once(iv, "name",
+                self._note(iv, ("name", mine, theirs),
                                "channel %s: T6 anchor names radiod %r, this channel reads %r; "
                                "not using T6", iv.channel, theirs, mine)
-            elif not anchor.same_run(iv.input_epoch_gps_s):
-                self._log_once(iv, "run",
+            elif not anchor.same_run(iv.input_epoch_gps_s, SAME_RUN_TOL_S):
+                self._note(iv, ("run",),
                                "channel %s: T6 anchor belongs to another run (epoch %.3f s, "
                                "interval %.3f s); not using T6", iv.channel,
                                anchor.input_epoch_gps_s, iv.input_epoch_gps_s)
             else:
+                self._note(iv, ("t6",))
                 return Label(
                     utc_ns=anchor.utc_ns_at(iv.first_input_index),
                     delay_basis="t6", t_level="T6",
@@ -124,13 +149,22 @@ class Tie:
                                           a_level_provenance=anchor.a_level_provenance),
                     engineering={"delay_basis": "t6", "t_level": "T6"})
 
+        else:
+            self._note(iv, ("noanchor",),
+                       "channel %s: no fresh T6 anchor; not using T6", iv.channel)
+
         base = _radiod_utc_ns(iv)
         snap = None
         if self.authority is not None:
             try:
                 snap = self.authority.read()
+                if self._auth_failed:
+                    log.info("authority read works again")
+                self._auth_failed = False
             except Exception as exc:  # noqa: BLE001 - never crash the audio path
-                log.warning("authority read failed: %s", exc)
+                if not self._auth_failed:
+                    log.warning("authority read failed: %s", exc)
+                self._auth_failed = True
         if snap is not None and snap.offset_usable:
             eng = {"delay_basis": "authority", "t_level": snap.t_level_active,
                    "authority_sigma_ns": snap.sigma_ns, "chain_delay_ns": self.chain_delay_ns}
