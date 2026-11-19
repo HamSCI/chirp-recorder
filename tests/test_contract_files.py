@@ -4,6 +4,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 def test_unit_passes_instance_only():
     unit = (ROOT / "systemd/chirp-recorder@.service").read_text()
     assert "daemon --instance %i" in unit and "--radiod-id %i" not in unit and "User=chirprec" in unit
+    assert "-/run/hf-timestd" in unit
 
 def test_manifest_pipelines_match_codar_tags():
     d = tomllib.loads((ROOT / "deploy.toml").read_text())

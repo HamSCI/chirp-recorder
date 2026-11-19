@@ -7,7 +7,7 @@
 #   1. Creates service user chirprec:chirprec
 #   2. Clones/links repo to /opt/git/sigmond/chirp-recorder
 #   3. Creates venv at /opt/git/sigmond/chirp-recorder/venv with editable install
-#   4. Renders config template (non-destructive — never overwrites)
+#   4. Creates /etc/chirp-recorder (per-instance configs only; renders none)
 #   5. Installs systemd unit template
 #
 # Idempotent: safe to re-run.
@@ -174,18 +174,18 @@ ui_info "Syncing chirp-recorder + ka9q-python (editable) into $VENV_DIR"
 UV_PROJECT_ENVIRONMENT="$VENV_DIR" \
     uv sync --project "$REPO_SOURCE" --frozen --no-dev --quiet
 
-# sigmond is the host-wide orchestrator; chirp-recorder lazy-imports
-# sigmond.hamsci_sink.Writer for the spots SQLite sink (with a no-op
-# fallback when absent).  Not declared in chirp-recorder's pyproject
-# so uv sync doesn't install it; explicit uv pip install when the
-# sibling exists.  uv pip install needs --python (UV_PROJECT_ENVIRONMENT
-# only applies to project commands like uv sync).
+# sigmond is the host-wide orchestrator.  chirp-recorder's sink writer falls
+# back to sigmond.hamsci_sink.Writer when hs_uploader does not import.  The
+# pyproject does not declare sigmond, so uv sync does not install it; this
+# step installs it editable when the sibling exists.  uv pip install needs
+# --python (UV_PROJECT_ENVIRONMENT only applies to project commands like
+# uv sync).
 if [[ -d /opt/git/sigmond/sigmond ]]; then
     ui_info "Installing sigmond (editable) into venv"
     uv pip install --quiet --python "$VENV_DIR/bin/python3" -e /opt/git/sigmond/sigmond
 else
-    ui_info "sigmond repo not found at /opt/git/sigmond/sigmond -- SQLite spot sink"
-    ui_info "  will resolve to a no-op fallback."
+    ui_info "sigmond repo not found at /opt/git/sigmond/sigmond -- the sink writer"
+    ui_info "  uses hs_uploader alone."
 fi
 
 # Post-install verify

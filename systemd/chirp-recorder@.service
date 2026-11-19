@@ -50,7 +50,7 @@ ReadWritePaths=/var/lib/chirp-recorder /var/log/chirp-recorder
 # The sink: codar.spots and the sigmondb chirp rows.  The
 # "-" lets a host without sigmond or hs-uploader start anyway.
 ReadWritePaths=-/var/lib/hs-uploader -/var/lib/sigmond
-ReadOnlyPaths=/etc/chirp-recorder /run/hf-timestd
+ReadOnlyPaths=/etc/chirp-recorder -/run/hf-timestd
 PrivateNetwork=false
 
 CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE
