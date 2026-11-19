@@ -56,10 +56,9 @@ def test_sigma_shrinks_with_level(synth):
     weak = detect_group(synth(fs=64_000, arrivals=[(0.0429, 0.1)], seconds=30), fs=64_000,
                         channel_centre_hz=4.463e6, group=GROUP_4463).arrivals[0]
     assert strong.delay_sigma_ns < weak.delay_sigma_ns
-    # the bound, verbatim, plus the refine bias in quadrature: 190 ns * 64000 / fs
+    # the bound, verbatim
     B = WF_4463.bandwidth_hz()
     want = 1e9 * np.sqrt(3) / (np.pi * B * np.sqrt(2 * 10 ** (strong.level_db / 10) * 30))
-    want = float(np.hypot(want, 190.0))
     assert abs(strong.delay_sigma_ns - want) < 1e-6 * want
 
 
@@ -239,7 +238,9 @@ def test_doppler_beyond_the_alias_limit_is_not_corrected(synth):
     x = synth(fs=64_000, arrivals=[(0.043, 1.0)], seconds=30, doppler_hz=0.55)
     a = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals[0]
     assert a.doppler_ambiguous is True
-    assert a.tau_ns == a.tau_uncorrected_ns
+    # no coupling correction (that would move it by 22 us); only the refine
+    assert abs(a.tau_ns - a.tau_uncorrected_ns) < 500
+    assert abs(a.tau_ns - 43_000_000) > 10_000
 
 
 def test_ordinary_doppler_is_not_ambiguous(synth):
@@ -283,3 +284,40 @@ def test_known_gate_not_reported_as_fitted(synth):
     x = synth(fs=64_000, arrivals=[(0.0429, 1.0)], seconds=30)
     r = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463)
     assert r.gate is None
+
+
+# --- refine bias and differential Doppler (fix round 3) ------------------------
+@pytest.mark.parametrize("wf,fs", [
+    (WF_4463, 48_000), (WF_4463, 64_000), (WF_4463, 96_000), (WF_4463, 192_000),
+    (WF_13_4875, 64_000), (WF_13_4875, 96_000), (WF_13_4875, 192_000)])
+def test_refine_bias_below_50_ns_at_every_fs_over_b(wf, fs):
+    # fs/B = 1.29 (13 MHz at 64 kS/s) .. 7.46 (4.463 MHz at 192 kS/s)
+    from hamsci_dsp.chirp.waveform import gated
+
+    from chirp_recorder.core.detect import _refined_tau
+    worst = 0.0
+    for fr in np.arange(0.0, 1.0, 0.1):
+        tau = (int(0.043 * fs) + fr) / fs
+        sweeps = np.tile(gated(wf, fs, tau), (2, 1))
+        worst = max(worst, abs(_refined_tau(sweeps, wf, fs, tau, 0.0) - tau) * 1e9)
+    assert worst < 50, (wf.bandwidth_hz(), fs, worst)
+
+
+@pytest.mark.parametrize("sep_s", [1e-3, 2e-3, 3e-3])
+@pytest.mark.parametrize("seed", [11, 12])
+def test_pair_with_differential_doppler_is_not_flagged(synth, sep_s, seed):
+    # a sky wave 15 dB down with 0.1 Hz differential Doppler: the cross term
+    # averages out over 30 s, so the predicted bias stays under delay_sigma
+    t = 0.00412 + sep_s
+    x = synth(fs=64_000, arrivals=[(0.00412, 1.0, 0.0), (t, 10 ** (-15 / 20), 0.1)],
+              seconds=30, seed=seed)
+    r = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463)
+    assert len(r.arrivals) == 2 and not any(a.overlap_flag for a in r.arrivals)
+
+
+def test_coherent_pair_twenty_db_down_one_ms_away_is_flagged(synth):
+    t = 0.00412 + 1e-3
+    x = synth(fs=64_000, arrivals=[(0.00412, 1.0), (t, 0.1)], seconds=30, seed=11)
+    r = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463)
+    sky = [a for a in r.arrivals if a.tau_ns > 4_800_000]
+    assert sky and all(a.overlap_flag for a in sky)

@@ -225,7 +225,8 @@ def fake_auth():
 def synth():
     """Gated chirps from hamsci_dsp, summed over arrivals, plus complex noise.
 
-    arrivals: (tau_s, amplitude) pairs.  Each arrival has one random carrier
+    arrivals: (tau_s, amplitude[, doppler_hz]) tuples; a third value
+    overrides ``doppler_hz`` for that arrival.  Each arrival has one random carrier
     phase, constant across sweeps, so a Doppler ramp stays recoverable;
     ``doppler_hz`` shifts the frequency continuously through the interval
     (doppler_mode="continuous"; real Doppler) or adds one phase step per
@@ -242,18 +243,18 @@ def synth():
         rng = np.random.default_rng(seed)
         n = samples_per_period(wf, fs)
         m = int(seconds / wf.period_s)
-        x = np.zeros((m, n), complex)
-        for tau, amp in arrivals:
-            one = gated(wf, fs, tau)
+        x = np.zeros(m * n, complex)
+        idx = np.arange(m * n)
+        for arr in arrivals:
+            tau, amp = arr[0], arr[1]
+            f = arr[2] if len(arr) > 2 else doppler_hz      # per-arrival Doppler
+            sweeps_one = np.tile(gated(wf, fs, tau), m)
             ph0 = np.exp(2j * np.pi * rng.random())
             if doppler_mode == "step":       # one phase step per sweep
-                ramp = np.exp(2j * np.pi * doppler_hz * wf.period_s * np.arange(m))
-                x += amp * ph0 * ramp[:, None] * one[None, :]
+                ramp = np.repeat(np.exp(2j * np.pi * f * wf.period_s * np.arange(m)), n)
+                x += amp * ph0 * ramp * sweeps_one
             else:                            # a continuous frequency offset
-                x += amp * ph0 * one[None, :]
-        x = x.reshape(-1)
-        if doppler_mode != "step" and doppler_hz:
-            x = x * np.exp(2j * np.pi * doppler_hz * np.arange(x.size) / fs)
+                x += amp * ph0 * sweeps_one * np.exp(2j * np.pi * f * idx / fs)
         x = x * np.exp(2j * np.pi * centre_offset_hz * np.arange(x.size) / fs)
         x += noise * (rng.standard_normal(x.size) + 1j * rng.standard_normal(x.size)) / np.sqrt(2)
         return x.astype(np.complex64)
