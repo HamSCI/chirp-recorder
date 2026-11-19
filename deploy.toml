@@ -1,0 +1,156 @@
+[package]
+name             = "chirp-recorder"
+version          = "0.1.0"
+contract_version = "0.8"
+license          = "MIT"
+
+# Identity and sigmond-side policy.
+[client]
+name        = "chirp-recorder"
+kind        = "client"
+description = "Times CODAR chirps on radiod IQ and writes sigmondb arrival rows"
+repo        = "https://github.com/HamSCI/chirp-recorder"
+requires    = ["ka9q-python", "ka9q-radio"]
+uses        = ["ka9q-python", "hamsci-dsp"]
+contract    = "0.8"
+
+# Starts after radiod (priority 0), in parallel with the decoder chain.
+[client.lifecycle]
+start_priority = 200
+
+# Configuration interview (CONTRACT v0.5 section 14): sigmond calls these
+# subcommands.  They arrive in a later task.
+[contract.config]
+init = ["/usr/local/bin/chirp-recorder", "config", "init"]
+edit = ["/usr/local/bin/chirp-recorder", "config", "edit"]
+
+[build]
+steps = [
+    "python3 -m venv /opt/git/sigmond/chirp-recorder/venv",
+    "/opt/git/sigmond/chirp-recorder/venv/bin/pip install --upgrade pip setuptools wheel",
+    "/opt/git/sigmond/chirp-recorder/venv/bin/pip install -e /opt/git/sigmond/chirp-recorder",
+]
+produces = [
+    "/opt/git/sigmond/chirp-recorder/venv/bin/chirp-recorder",
+]
+
+[[install.steps]]
+kind = "link"
+src  = "/opt/git/sigmond/chirp-recorder/venv/bin/chirp-recorder"
+dst  = "/usr/local/bin/chirp-recorder"
+
+[[install.steps]]
+kind = "link"
+src  = "systemd/chirp-recorder@.service"
+dst  = "/etc/systemd/system/chirp-recorder@.service"
+
+[[install.steps]]
+kind  = "mkdir"
+dst   = "/var/lib/chirp-recorder"
+owner = "chirprec:chirprec"
+mode  = "0755"
+
+[[install.steps]]
+kind  = "mkdir"
+dst   = "/var/log/chirp-recorder"
+owner = "chirprec:chirprec"
+mode  = "0755"
+
+# No instances_from key: sigmond finds instances from
+# /etc/chirp-recorder/<KEY>.toml, one file per receiver.
+[systemd]
+templated_units = ["chirp-recorder@.service"]
+
+# No [[radiod.fragment]]: channels open on demand through ensure_channel.  A
+# static fragment would run a channel on every radiod, whether or not a client
+# reads it.  Task 25 revisits this, because the dechirp channel's sweep keys
+# belong in a fragment.
+
+[deps]
+[[deps.pypi]]
+name    = "ka9q-python"
+version = ">=3.14.0"
+venv    = "/opt/git/sigmond/chirp-recorder/venv"
+
+[[deps.pypi]]
+name    = "numpy"
+version = ">=1.24"
+venv    = "/opt/git/sigmond/chirp-recorder/venv"
+
+[[deps.pypi]]
+name    = "hamsci-dsp"
+version = ">=0.10.0"
+venv    = "/opt/git/sigmond/chirp-recorder/venv"
+
+# ---------------------------------------------------------------------------
+# sigmondb rows -> wd30 (tasks/chirp-registry/2026-11-12-chirp-sigmondb-design.md).
+# The same tables and tar tags codar-sounder writes: sigmondb's ingest never asks
+# which program wrote a row.
+# sigmond renders them only for an hs-uploader that offers "sigmondb-tar".
+# ---------------------------------------------------------------------------
+
+[[hs_uploader.pipeline]]
+name = "chirp-sigmondb-arrival"
+requires_features = ["sigmondb-tar"]
+batch_limit = 5000
+[hs_uploader.pipeline.source]
+type = "sqlite"
+database = "sigmondb"
+table = "arrival"
+accepted_schema_versions = [1]
+producer = "chirp-recorder"         # no start_at: the rows are new; ship from the first
+[hs_uploader.pipeline.transport]
+type = "wsprdaemon_tar"
+name = "wsprdaemon-tar-sftp:chirp-sigmondb-arrival"
+servers = ["gw1.wsprdaemon.org", "gw2.wsprdaemon.org"]
+version = "4.0"
+receiver = "{call_pathsafe}"
+compression = "bz2"
+tar_root = "wsprdaemon"
+primary_table_name = "sigmondb.arrival"
+tar_tag = "chirp-arrival"
+[hs_uploader.pipeline.transport.ftp_fallback]
+servers = ["gw2.wsprdaemon.org"]
+ftp_user = "noisegraphs"
+remote_path = "upload"
+[hs_uploader.pipeline.retry]
+base = 2.0
+cap_sec = 900.0
+
+[[hs_uploader.pipeline]]
+name = "chirp-sigmondb-capture"
+requires_features = ["sigmondb-tar"]
+batch_limit = 5000
+[hs_uploader.pipeline.source]
+type = "sqlite"
+database = "sigmondb"
+table = "capture"
+accepted_schema_versions = [1]
+producer = "chirp-recorder"
+[hs_uploader.pipeline.transport]
+type = "wsprdaemon_tar"
+name = "wsprdaemon-tar-sftp:chirp-sigmondb-capture"
+servers = ["gw1.wsprdaemon.org", "gw2.wsprdaemon.org"]
+version = "4.0"
+receiver = "{call_pathsafe}"
+compression = "bz2"
+tar_root = "wsprdaemon"
+primary_table_name = "sigmondb.capture"
+tar_tag = "chirp-capture"
+[hs_uploader.pipeline.transport.ftp_fallback]
+servers = ["gw2.wsprdaemon.org"]
+ftp_user = "noisegraphs"
+remote_path = "upload"
+[hs_uploader.pipeline.retry]
+base = 2.0
+cap_sec = 900.0
+
+# ---------------------------------------------------------------------------
+# Sigmond UI hooks (drop-in registration for `smd watch`).
+# ---------------------------------------------------------------------------
+
+[client_features.watch]
+verb         = "chirp"
+description  = "CODAR chirp arrivals per receiver"
+verbose      = true
+per_instance = true
