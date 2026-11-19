@@ -218,3 +218,37 @@ def fake_auth():
     snap = _NS(offset_usable=True, rtp_to_utc_offset_ns=-1_234_567, t_level_active="T3",
                sigma_ns=2_500)
     return _NS(sigma_ns=2_500, snapshot=snap, read=lambda: snap)
+
+
+# --- synthetic chirps (Task 12) ----------------------------------------------
+@pytest.fixture
+def synth():
+    """Gated chirps from hamsci_dsp, summed over arrivals, plus complex noise.
+
+    arrivals: (tau_s, amplitude) pairs.  Each arrival has one random carrier
+    phase, constant across sweeps, so a Doppler ramp stays recoverable;
+    ``doppler_hz`` adds a per-sweep phase step 2*pi*doppler_hz*period.
+    ``centre_offset_hz`` shifts the transmitter's centre from the channel
+    centre; the shift runs on n counted from sample 0.  ``wf`` defaults to a
+    4.463 MHz, -25733.913 Hz/s, 1 s group gated at 6 ms.
+    """
+    from hamsci_dsp.chirp.waveform import Waveform, gated, samples_per_period
+
+    def make(*, fs, arrivals, seconds, centre_offset_hz=0.0, doppler_hz=0.0,
+             wf=None, noise=3.0, seed=7):
+        wf = wf or Waveform(4.463e6, -25_733.913, 1.0, None, 0.006, 0.5)
+        rng = np.random.default_rng(seed)
+        n = samples_per_period(wf, fs)
+        m = int(seconds / wf.period_s)
+        x = np.zeros((m, n), complex)
+        for tau, amp in arrivals:
+            one = gated(wf, fs, tau)
+            ph0 = np.exp(2j * np.pi * rng.random())
+            ramp = np.exp(2j * np.pi * doppler_hz * wf.period_s * np.arange(m))
+            x += amp * ph0 * ramp[:, None] * one[None, :]
+        x = x.reshape(-1)
+        x = x * np.exp(2j * np.pi * centre_offset_hz * np.arange(x.size) / fs)
+        x += noise * (rng.standard_normal(x.size) + 1j * rng.standard_normal(x.size)) / np.sqrt(2)
+        return x.astype(np.complex64)
+
+    return make
