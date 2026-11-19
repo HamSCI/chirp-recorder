@@ -56,9 +56,10 @@ def test_sigma_shrinks_with_level(synth):
     weak = detect_group(synth(fs=64_000, arrivals=[(0.0429, 0.1)], seconds=30), fs=64_000,
                         channel_centre_hz=4.463e6, group=GROUP_4463).arrivals[0]
     assert strong.delay_sigma_ns < weak.delay_sigma_ns
-    # the bound, verbatim
+    # the bound, verbatim, plus the refine bias in quadrature: 190 ns * 64000 / fs
     B = WF_4463.bandwidth_hz()
     want = 1e9 * np.sqrt(3) / (np.pi * B * np.sqrt(2 * 10 ** (strong.level_db / 10) * 30))
+    want = float(np.hypot(want, 190.0))
     assert abs(strong.delay_sigma_ns - want) < 1e-6 * want
 
 
@@ -153,8 +154,9 @@ def test_coherent_overlap_near_rung_five_is_flagged(synth):
     r = _two(synth, 0.00412 + 5 * rung_spacing_s(WF_4463))
     sky = max(r.arrivals, key=lambda a: a.tau_ns)
     ground = min(r.arrivals, key=lambda a: a.tau_ns)
-    assert sky.overlap_flag is True and ground.overlap_flag is False
-    assert r.overlap_flagged == 1
+    # the coherent pair biases both: the ground wave sees the sky's cross term too
+    assert sky.overlap_flag is True and ground.overlap_flag is True
+    assert r.overlap_flagged == 2
 
 
 def test_isolated_arrivals_carry_no_overlap_flag(synth):
@@ -211,14 +213,54 @@ def test_doppler_range_coupling_is_corrected(synth, rate, f):
     assert not a.overlap_flag
 
 
-def test_doppler_correction_at_an_arbitrary_fraction_is_within_two_us(synth):
-    # CLEAN's parabolic peak refine biases a delay by up to about 1.5 us,
-    # depending on its position between samples (hamsci-dsp); the correction
-    # inherits it.
+def test_doppler_correction_at_an_arbitrary_fraction_is_within_500_ns(synth):
+    # CLEAN's parabolic refine biases a delay by up to ~190 ns at 64 kS/s,
+    # depending on its position between samples; delay_sigma_ns carries it.
     x = synth(fs=64_000, arrivals=[(0.0429, 1.0)], seconds=30, doppler_hz=0.2)
     a = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals[0]
-    assert abs(a.tau_ns - 42_900_000) < 2_000
+    assert abs(a.tau_ns - 42_900_000) < 500
     assert a.tau_uncorrected_ns - 42_900_000 > 5_000
+
+
+@pytest.mark.parametrize("seed", [7, 8, 9])
+def test_weaker_arrival_three_cells_off_is_timed_or_flagged(synth, seed):
+    # ground 1.0 + sky 0.3, 150 us (3.9 cells) apart: a coherent neighbour
+    # biases the sky delay by microseconds; it must carry overlap_flag
+    t = 0.00412 + 150e-6
+    x = synth(fs=64_000, arrivals=[(0.00412, 1.0), (t, 0.3)], seconds=30, seed=seed)
+    r = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463)
+    sky = [a for a in r.arrivals if a.tau_ns > 4_200_000]
+    assert sky and all(a.overlap_flag or abs(a.tau_ns - round(t * 1e9)) < 500 for a in sky)
+
+
+def test_doppler_beyond_the_alias_limit_is_not_corrected(synth):
+    # 0.55 Hz reads as -0.45 Hz on a 1 s slow-time grid; the correction would
+    # err by one cell (38.9 us), so detect skips it and says so
+    x = synth(fs=64_000, arrivals=[(0.043, 1.0)], seconds=30, doppler_hz=0.55)
+    a = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals[0]
+    assert a.doppler_ambiguous is True
+    assert a.tau_ns == a.tau_uncorrected_ns
+
+
+def test_ordinary_doppler_is_not_ambiguous(synth):
+    x = synth(fs=64_000, arrivals=[(0.043, 1.0)], seconds=30, doppler_hz=0.2)
+    a = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals[0]
+    assert a.doppler_ambiguous is False
+
+
+def test_rederiving_the_delay_stays_small_in_memory():
+    # at 192 kS/s, 0.5 s period, 30 s: the interval is 92 MB as complex128;
+    # the Doppler-removed profile must not hold more than 50 MB beyond it
+    import tracemalloc
+
+    from chirp_recorder.core.detect import _derotated_profile
+    rng = np.random.default_rng(1)
+    sweeps = (rng.standard_normal((60, 96_000)) + 1j * rng.standard_normal((60, 96_000)))
+    tracemalloc.start()
+    _derotated_profile(sweeps, WF_13_4875, 192_000, 0.2)
+    peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
+    assert peak < 50e6, peak
 
 
 def test_step_doppler_does_not_couple_into_the_raw_delay(synth):
