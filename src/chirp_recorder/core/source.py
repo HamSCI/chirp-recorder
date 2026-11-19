@@ -134,7 +134,7 @@ class _KaStream:
         self._next: Optional[int] = None
         self._stream = _stream_cls(channel=channel_info, on_samples=self._on_samples)
 
-    def _zero_runs(self, samples) -> list[tuple[int, int]]:
+    def _zero_runs(self, samples, min_run: int) -> list[tuple[int, int]]:
         arr = np.asarray(samples)
         if arr.size == 0:
             return []
@@ -142,7 +142,7 @@ class _KaStream:
         edges = np.diff(np.concatenate(([0], z.view(np.int8), [0])))
         starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
         return [(int(a), int(b - a)) for a, b in zip(starts, ends)
-                if b - a >= self._min_zero_run]
+                if b - a >= min_run]
 
     def _on_samples(self, samples, quality) -> None:
         n = len(samples)
@@ -159,13 +159,21 @@ class _KaStream:
         self._next = (rtp0 + n) & _MASK
         reported = [g for g in (getattr(quality, "batch_gaps", None) or [])
                     if getattr(g.source, "value", g.source) not in _NO_SAMPLES]
-        runs = self._zero_runs(samples)
-        if reported and len(runs) != len(reported):
-            log.error("batch of %d samples reports %d gap(s) but holds %d run(s) of "
-                      "exact zeros; the whole batch is discarded", n, len(reported),
-                      len(runs))
-            self._on_lost(rtp0, n, [int(g.duration_samples) for g in reported])
-            return
+        durs = [int(g.duration_samples) for g in reported]
+        # a report may name a fill shorter than min_zero_run (the last fragment
+        # of a packet): search for runs as short as the shortest report
+        runs = self._zero_runs(samples, min([self._min_zero_run] + durs))
+        if reported:
+            fits = (len(runs) == len(reported)
+                    and all(r >= d for r, d in zip(sorted(r for _, r in runs),
+                                                   sorted(durs))))
+            if not fits:
+                log.error("batch of %d samples reports gaps of %s samples but holds "
+                          "zero runs of %s; reports and runs do not match one to "
+                          "one, the whole batch is discarded", n, sorted(durs),
+                          sorted(r for _, r in runs))
+                self._on_lost(rtp0, n, durs)
+                return
         if runs and not reported:
             log.error("batch of %d samples holds %d unreported run(s) of exact "
                       "zeros; they are treated as gaps", n, len(runs))

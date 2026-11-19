@@ -394,3 +394,79 @@ def test_changed_ssrc_on_re_ensure_stops_the_source(fake_radiod, caplog):
     with pytest.raises(RuntimeError, match="changed ssrc"):
         src.take_all()
     assert "returned ssrc" in caplog.text
+
+
+def _reseq_run(sizes, lost, zero_pkts):
+    """ka9q-python's real resequencer (180-sample fragments), batched ten
+    chunks at a time as RadiodStream does, into the adapter.  Returns the
+    adapter's calls plus the shipped pieces that hold exact zeros."""
+    from ka9q.resequencer import PacketResequencer, RTPPacket
+
+    class FS:
+        def __init__(self, channel, on_samples):
+            pass
+
+    calls = []
+    from chirp_recorder.core.source import _KaStream
+    ka = _KaStream(None,
+                   lambda r, s: calls.append(("pkt", r, len(s), bool((np.asarray(s) == 0).any()))),
+                   lambda r, n, g: calls.append(("lost", r, n)), _stream_cls=FS)
+    rs = PacketResequencer(buffer_size=8, samples_per_packet=180, sample_rate=64_000)
+    ts, sb, gb, start, cnt, delivered = 0, [], [], None, 0, 0
+    for seq, n in enumerate(sizes):
+        t, ts = ts, ts + n
+        if seq in lost:
+            continue
+        sig = (np.zeros(n, np.complex64) if seq in zero_pkts
+               else (np.ones(n) * (1 + seq) + 1j).astype(np.complex64))
+        out, gaps = rs.process_packet(RTPPacket(seq, t, 1, sig))
+        if out is not None:
+            if not sb:
+                start = rs.last_chunk_rtp_start
+            sb.append(out)
+            gb.extend(gaps)
+            cnt += 1
+            if cnt >= 10:
+                s = np.concatenate(sb)
+                ka._on_samples(s, SimpleNamespace(delivered_rtp_start=start,
+                                                  batch_start_sample=delivered,
+                                                  batch_gaps=gb))
+                delivered += len(s)
+                sb, gb, cnt = [], [], 0
+    return calls
+
+
+# 64 kS/s, 20 ms packet = 7 fragments of 180 plus a 20-sample tail
+_SIZES = ([180] * 7 + [20]) * 20
+
+
+def test_short_tail_fragment_lost_alone_is_never_shipped_clean():
+    calls = _reseq_run(_SIZES, {15}, set())
+    assert not [c for c in calls if c[0] == "pkt" and c[3]]
+    assert any(c[0] == "lost" for c in calls)
+
+
+def test_short_reported_gap_beside_an_unreported_long_run_condemns_the_batch(caplog):
+    caplog.set_level(logging.ERROR)
+    # fragment 15 (20 samples) lost; a radiod zero-block fragment 17 arrives while
+    # the resequencer waits, and ka9q-python drops that report
+    calls = _reseq_run(_SIZES, {15}, {17})
+    assert not [c for c in calls if c[0] == "pkt" and c[3]], calls
+    assert "do not match one to one" in caplog.text
+
+
+def test_kastream_short_report_matches_its_own_short_run():
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(_batch(500, (200, 20)),
+                   _q(4_000, 0, [_gap(GapSource.NETWORK_LOSS, 200, 20)]))
+    assert calls == [("pkt", 4_000, 200), ("lost", 4_200, 20, (20,)),
+                     ("pkt", 4_220, 280)]
+
+
+def test_kastream_run_shorter_than_its_report_condemns_the_batch():
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(_batch(500, (200, 30)),
+                   _q(4_000, 0, [_gap(GapSource.NETWORK_LOSS, 200, 100)]))
+    assert calls == [("lost", 4_000, 500, (100,))]
