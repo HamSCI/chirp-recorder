@@ -110,3 +110,14 @@ def test_writer_prefers_gpsdo_over_typed_grid_and_emits_no_precise_digits():
     text = m.render(m.pick_positions(rows), as_of="2026-11-19")
     assert "41.4437" not in text and "-81.6213" not in text
     assert text.count("[stations.") == 2
+
+
+def test_each_band_logs_its_own_line_even_at_equal_km(caplog):
+    caplog.set_level("INFO")
+    hf = Transmitter("HF", "codar", 13.45e6, -25_733.913, 1.0, 25_734, 39.5, -74.3)
+    same = ((3e6, 6e6, 300.0), (6e6, 15e6, 300.0), (15e6, 60e6, 150.0))
+    rank(form_channels([NJ], "s") + form_channels([hf], "s"), {"NJ": NJ, "HF": hf},
+         receiver_lat=38.0, receiver_lon=-95.0, self_reporter="ME", t6=T6,
+         reach_table=same)
+    lines = [r.getMessage() for r in caplog.records if "T6 hearing reach" in r.getMessage()]
+    assert len(lines) == 2

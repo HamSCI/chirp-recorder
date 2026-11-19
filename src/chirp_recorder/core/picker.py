@@ -72,6 +72,14 @@ def reach_km(freq_hz: float, table=DEFAULT_REACH_KM) -> float:
     return rows[0][2] if freq_hz < rows[0][0] else rows[-1][2]
 
 
+def _band(freq_hz: float, table) -> tuple[float, float]:
+    for lo, hi, _ in table:
+        if lo <= freq_hz < hi:
+            return (lo, hi)
+    rows = sorted(table)
+    return rows[0][:2] if freq_hz < rows[0][0] else rows[-1][:2]
+
+
 def _reason(n: int, heard: list[str]) -> str:
     if n == 0:
         return "no other T6 station hears this channel"
@@ -88,12 +96,13 @@ def rank(plans: list[ChannelPlan], txs: dict[str, Transmitter], *,
     if phase not in PHASES:
         raise ValueError(f"picker phase {phase!r} must be one of {PHASES}")
     others = [s for s in t6 if s.reporter_id != self_reporter]
-    logged: set[float] = set()
+    logged: set[tuple[float, float]] = set()
     out: list[ChannelChoice] = []
     for plan in plans:
         reach = reach_km(plan.centre_hz, reach_table)
-        if reach not in logged:
-            logged.add(reach)
+        band = _band(plan.centre_hz, reach_table)
+        if band not in logged:
+            logged.add(band)
             log.info("picker: T6 hearing reach %g km at %.3f MHz (%s)",
                      reach, plan.centre_hz / 1e6, reach_source)
         members = [txs[t] for g in plan.groups for t in g.tx_ids if t in txs]
@@ -119,7 +128,7 @@ class ChannelMenu(Protocol):
                 status: str, hour_utc: int) -> list[ChannelChoice]: ...
 
 
-class VendoredMenu:
+class VendoredMenu(ChannelMenu):
     """The vendored seed, transmitters within AUDIBLE_KM, ranked.  The scout's
     menu later becomes a second implementation of ChannelMenu."""
 
