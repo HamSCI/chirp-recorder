@@ -1,0 +1,149 @@
+"""The physics stopgap against codar-sounder's own per-transmitter pipeline
+on the same CPI (pre-flight C3: the reference is _TransmitterPipeline)."""
+from __future__ import annotations
+
+import json
+import logging
+from pathlib import Path
+
+import pytest
+
+from codar_sounder.core.daemon import _TransmitterPipeline
+from chirp_recorder import __version__
+from chirp_recorder.config import ConfigError
+from chirp_recorder.core.writer import RowWriter
+from chirp_recorder.physics import PhysicsOut, PhysicsStopgap
+from chirp_recorder.physics.spots import make_spots_writer
+
+
+def _stop(plan_and_txs, settings, out, **kw):
+    return PhysicsStopgap(*plan_and_txs, settings=settings, output_dir=out,
+                          reporter_id="AC0G/B4", radiod="b4", host_call="AC0G",
+                          host_grid="EM38", **kw)
+
+
+def _records(root: Path):
+    f = next(root.rglob("*.jsonl"))
+    return [json.loads(line) for line in f.read_text().splitlines()]
+
+
+def test_records_match_codar_sounder_on_the_same_cpi(
+        tmp_path, synth_cpi, tx_block, ref_kw, plan_and_txs, physics_settings,
+        split_into_intervals):
+    x, start = synth_cpi(group_range_km=420.0)
+    ref = _TransmitterPipeline(tx_config=tx_block, output_dir=tmp_path / "ref",
+                               ch_writer=None, sigmondb_hook=None, **ref_kw)
+    ref.process_cpi(x, start)
+    stop = _stop(plan_and_txs, physics_settings, tmp_path / "new")
+    for iv, lab in split_into_intervals(x, start):
+        stop.feed(iv, lab)
+    a, b = _records(tmp_path / "ref"), _records(tmp_path / "new")
+    assert a and len(a) == len(b)
+    drop = {"client"}
+    assert [{k: v for k, v in r.items() if k not in drop} for r in a] == \
+           [{k: v for k, v in r.items() if k not in drop} for r in b]
+    assert {r["client"] for r in b} == {"chirp-recorder"}
+    # layout: <output_dir>/physics/<tx>/YYYY/MM/DD.jsonl
+    p = next((tmp_path / "new").rglob("*.jsonl")).relative_to(tmp_path / "new")
+    assert p.parts[:2] == ("physics", "TX1") and len(p.parts) == 5
+
+
+def test_spots_rows_match_and_name_chirp_recorder(
+        tmp_path, monkeypatch, fake_sink, synth_cpi, tx_block, ref_kw, plan_and_txs,
+        physics_settings, split_into_intervals):
+    import hs_uploader.sink as sink
+    x, start = synth_cpi()
+    _TransmitterPipeline(tx_config=tx_block, output_dir=tmp_path / "ref",
+                         ch_writer=fake_sink("ref"), sigmondb_hook=None,
+                         **ref_kw).process_cpi(x, start)
+    # make_spots_writer builds the sink writer; the fake records its producer
+    made = {}
+
+    def from_env(**kw):
+        made.update(kw)
+        return fake_sink("new", producer=kw.get("producer"))
+    monkeypatch.setattr(sink.Writer, "from_env", staticmethod(from_env))
+    spots_writer = make_spots_writer()
+    assert (made["table"], made["mode"], made["schema_version"], made["batch_rows"],
+            made["producer"]) == ("spots", "codar", 1, 200, "chirp-recorder")
+    stop = _stop(plan_and_txs, physics_settings, tmp_path / "newdir")
+    w = RowWriter(output_dir=tmp_path / "new", sink_writers=(None, None, spots_writer),
+                  phase_store=None)
+    for iv, lab in split_into_intervals(x, start):
+        w.put(None, [], [], spots=stop.feed(iv, lab).spots)       # the worker's path (C12)
+    w.close()
+    ref, new = fake_sink.rows("ref"), fake_sink.rows("new")
+    assert ref and len(ref) == len(new)
+    strip = lambda rows: [{k: v for k, v in r.items()                      # noqa: E731
+                           if k not in ("producer", "processing_version")} for r in rows]
+    assert strip(ref) == strip(new)
+    assert {r["producer"] for r in new} == {"chirp-recorder"}
+    assert {r["processing_version"] for r in new} == {f"chirp-recorder/{__version__}"}
+
+
+def test_a_gap_discards_the_partial_cpi(
+        tmp_path, plan_and_txs, physics_settings, intervals_with_gap,
+        contiguous_intervals):
+    stop = _stop(plan_and_txs, physics_settings, tmp_path)
+    assert all(stop.feed(iv, lab).paths == [] for iv, lab in intervals_with_gap)
+    # positive control (pre-flight C23): two contiguous intervals make one CPI
+    outs = [stop.feed(iv, lab) for iv, lab in contiguous_intervals]
+    assert outs[0].paths == [] and len(outs[1].paths) == 1
+    assert outs[1].spots
+
+
+def test_a_new_input_epoch_breaks_contiguity(
+        tmp_path, plan_and_txs, physics_settings, contiguous_intervals):
+    from dataclasses import replace
+    stop = _stop(plan_and_txs, physics_settings, tmp_path)
+    (iv0, l0), (iv1, l1) = contiguous_intervals
+    stop.feed(iv0, l0)
+    out = stop.feed(replace(iv1, input_epoch_gps_s=iv1.input_epoch_gps_s + 500.0), l1)
+    assert out == PhysicsOut(paths=[], spots=[])
+
+
+def test_coherent_seconds_must_be_whole_intervals(tmp_path, plan_and_txs, physics_settings):
+    with pytest.raises(ConfigError, match="coherent_seconds"):
+        _stop(plan_and_txs, dict(physics_settings, coherent_seconds=45), tmp_path)
+
+
+def test_a_physics_exception_logs_one_warning_per_cpi(
+        tmp_path, monkeypatch, caplog, plan_and_txs, physics_settings,
+        contiguous_intervals):
+    import chirp_recorder.physics.pipeline as pl
+
+    def boom(*a, **k):
+        raise RuntimeError("synthetic physics fault")
+    monkeypatch.setattr(pl, "range_profile", boom)
+    stop = _stop(plan_and_txs, physics_settings, tmp_path)
+    with caplog.at_level(logging.WARNING):
+        outs = [stop.feed(iv, lab) for iv, lab in contiguous_intervals]
+    assert outs == [PhysicsOut([], []), PhysicsOut([], [])]
+    warns = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warns) == 1 and "synthetic physics fault" in warns[0].getMessage()
+
+
+def test_a_transmitter_off_the_channel_centre_is_mixed_down(
+        tmp_path, synth_cpi, plan_and_txs, physics_settings, split_into_intervals):
+    """A channel centred 5 kHz below the transmitter sees it 5 kHz high; the
+    stopgap mixes it back and finds the same peak as on the centred channel."""
+    import dataclasses
+
+    import numpy as np
+    x, start = synth_cpi()
+    plan, txs = plan_and_txs
+    base = _stop((plan, txs), physics_settings, tmp_path / "base")
+    for iv, lab in split_into_intervals(x, start):
+        base.feed(iv, lab)
+    shift = 5_000.0
+    xs = (x * np.exp(2j * np.pi * shift * np.arange(x.size) / plan.sample_rate_hz)
+          ).astype(np.complex64)
+    plan2 = dataclasses.replace(plan, centre_hz=plan.centre_hz - shift)
+    off = _stop((plan2, txs), physics_settings, tmp_path / "off")
+    for iv, lab in split_into_intervals(xs, start):
+        off.feed(iv, lab)
+    a, b = _records(tmp_path / "base"), _records(tmp_path / "off")
+    assert a and len(a) == len(b)
+    for ra, rb in zip(a, b):
+        assert ra["group_range_km"] == rb["group_range_km"]
+        assert ra["snr_db"] == pytest.approx(rb["snr_db"], abs=0.05)

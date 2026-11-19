@@ -20,6 +20,8 @@ from typing import Optional
 import numpy as np
 from hamsci_dsp import sigmondb_rows as sr
 
+from chirp_recorder.physics.spots import make_spots_writer
+
 log = logging.getLogger(__name__)
 
 PHASE_KEEP_DAYS = 7
@@ -41,8 +43,9 @@ def make_sink_writers() -> Optional[tuple]:
             Writer.from_env(table=t, mode="sigmondb", schema_version=sr.SCHEMA_VERSION,
                             producer="chirp-recorder", batch_rows=200)
             for t in ("arrival", "capture"))
-        spots = Writer.from_env(table="spots", mode="codar", schema_version=1,
-                                producer="chirp-recorder", batch_rows=200)
+        spots = make_spots_writer()
+        if spots is None:
+            return None
         return arrival, capture, spots
     except ImportError:
         log.debug("no sink writer importable; sigmondb rows off")

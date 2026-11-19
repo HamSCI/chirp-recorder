@@ -260,3 +260,140 @@ def synth():
         return x.astype(np.complex64)
 
     return make
+
+
+# --- physics stopgap (Task 14); every value is made up -----------------------
+import datetime as _dt  # noqa: E402
+
+PHYS_RATE = 64_000
+PHYS_RX = (41.0, -76.0)        # a coarse made-up receiver, not a real site
+PHYS_TX = (38.0, -75.5)        # a coarse made-up transmitter, ~340 km away
+PHYS_SWEEP_RATE = -25_733.913
+PHYS_INPUT_RATE = 129_600_000
+PHYS_START_NS = 1_800_000_000 * 10**9 + 250_000_000
+
+
+def phys_tx_block():
+    return {"id": "TX1", "center_freq_hz": 4_463_000,
+            "sweep_rate_hz_per_s": PHYS_SWEEP_RATE, "sweep_bw_hz": 25_734.0,
+            "sweep_repetition_hz": 1.0, "tx_lat_deg": PHYS_TX[0],
+            "tx_lon_deg": PHYS_TX[1]}
+
+
+@pytest.fixture
+def tx_block():
+    return phys_tx_block()
+
+
+@pytest.fixture
+def ref_kw():
+    """codar-sounder's _TransmitterPipeline keywords that match PHYS_SETTINGS."""
+    return dict(receiver_lat=PHYS_RX[0], receiver_lon=PHYS_RX[1], radiod_id="b4",
+                radiod_status_dns="radiod.local", sample_rate_hz=float(PHYS_RATE),
+                coherent_seconds=60.0, range_min_km=200.0, range_max_km=800.0,
+                snr_threshold_db=5.0, clutter_window=20, max_peaks_per_cpi=4,
+                host_call="AC0G", host_grid="EM38", reporter_id="AC0G/B4",
+                processing_version="codar-ref")
+
+
+@pytest.fixture
+def physics_settings():
+    return dict(enabled=True, coherent_seconds=60, range_min_km=200, range_max_km=800,
+                snr_threshold_db=5.0, max_peaks_per_cpi=4, clutter_window=20,
+                interval_s=30, tdma_offset_samples={"TX1": 0},
+                receiver_lat=PHYS_RX[0], receiver_lon=PHYS_RX[1])
+
+
+@pytest.fixture
+def plan_and_txs():
+    from chirp_recorder.core.catalogue import Transmitter
+    from chirp_recorder.core.channels import ChannelPlan, groups_for
+    tx = Transmitter(id="TX1", kind="codar", centre_hz=4_463_000.0,
+                     rate_hz_per_s=PHYS_SWEEP_RATE, period_s=1.0, sweep_bw_hz=25_734.0,
+                     lat=PHYS_TX[0], lon=PHYS_TX[1])
+    plan = ChannelPlan("4.4630MHz", "radiod.local", 4_463_000.0, PHYS_RATE,
+                       groups_for([tx]))
+    return plan, {"TX1": tx}
+
+
+@pytest.fixture
+def synth_cpi():
+    """codar-sounder's SyntheticIQSource, realtime=False: one CPI of samples."""
+    from codar_sounder.core.stream import SyntheticIQSource
+
+    def make(*, fs=PHYS_RATE, seconds=60, group_range_km=420.0, seed=0):
+        src = SyntheticIQSource(
+            sample_rate_hz=float(fs), sweep_rate_hz_per_s=PHYS_SWEEP_RATE,
+            sweep_repetition_hz=1.0, cpi_seconds=float(seconds),
+            target_group_range_km=group_range_km, realtime=False, seed=seed)
+        x, _ = next(iter(src))
+        start = _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc) + _dt.timedelta(
+            microseconds=PHYS_START_NS // 1000)
+        return x, start
+    return make
+
+
+def _label(utc_ns):
+    from chirp_recorder.core.timing import Label
+    return Label(utc_ns=utc_ns, delay_basis="t6", t_level="T6", provenance={}, engineering={})
+
+
+@pytest.fixture
+def split_into_intervals():
+    """(Interval, Label) pairs cut from x; skip_s opens a gap before each
+    interval after the first by that many intervals' worth of input index."""
+    def split(x, start, *, interval_s=30, first_index=4_000_000_000.0, gap_after=None):
+        n = int(interval_s * PHYS_RATE)
+        step = interval_s * PHYS_INPUT_RATE
+        start_ns = int((start - _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc))
+                       / _dt.timedelta(microseconds=1)) * 1000
+        out = []
+        for k in range(len(x) // n):
+            idx = first_index + k * step + (step if gap_after is not None and k > gap_after
+                                            else 0)
+            iv = Interval(samples=x[k * n:(k + 1) * n], first_rtp=k * n,
+                          first_input_index=idx, input_samprate=PHYS_INPUT_RATE,
+                          input_epoch_gps_s=EPOCH_S, channel="4.4630MHz",
+                          status_pair=None)
+            out.append((iv, _label(start_ns + k * interval_s * 10**9)))
+        return out
+    return split
+
+
+@pytest.fixture
+def contiguous_intervals(synth_cpi, split_into_intervals):
+    x, start = synth_cpi()
+    return split_into_intervals(x, start)
+
+
+@pytest.fixture
+def intervals_with_gap(synth_cpi, split_into_intervals):
+    x, start = synth_cpi()
+    return split_into_intervals(x, start, gap_after=0)
+
+
+class FakeSink:
+    """Records the rows a writer receives, with the producer it was built with."""
+    registry: dict = {}
+
+    def __init__(self, name, producer=None, **kw):
+        self.name, self.producer, self.kw = name, producer, kw
+        self.rows_in: list = []
+        self.closed = False
+
+    def insert(self, rows):
+        self.rows_in.extend(dict(r, producer=self.producer) for r in rows)
+
+    def close(self):
+        self.closed = True
+
+
+@pytest.fixture
+def fake_sink():
+    sinks: dict = {}
+
+    def make(name, producer=None):
+        sinks[name] = FakeSink(name, producer)
+        return sinks[name]
+    make.rows = lambda name: sinks[name].rows_in
+    return make

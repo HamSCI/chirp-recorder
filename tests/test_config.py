@@ -166,3 +166,37 @@ def test_picker_reach_km_defaults(tmp_path):
 def test_picker_reach_km_inverted_row_refused(tmp_path):
     with pytest.raises(ConfigError, match="reach_km"):
         load_instance("AC0G-T7", _picker(tmp_path, "reach_km = [[6e6, 3e6, 500.0]]"))
+
+
+def test_physics_defaults_and_settings_for_a_channel(tmp_path):
+    from chirp_recorder.config import physics_settings
+    _one(tmp_path, 'grid_square = "EM28"')
+    from chirp_recorder.core.catalogue import load_seed
+    a = next(t for t in load_seed().values() if 4.4e6 < t.centre_hz < 4.6e6)
+    p = tmp_path / "AC0G-T7.toml"
+    p.write_text(p.read_text().replace(
+        "transmitters =", f"tdma_offset_samples = {{ {a.id} = 12 }}\ntransmitters ="))
+    cfg = load_instance("AC0G-T7", tmp_path)
+    assert cfg.physics == {"enabled": True, "coherent_seconds": 60, "range_min_km": 200,
+                           "range_max_km": 800, "snr_threshold_db": 5.0,
+                           "max_peaks_per_cpi": 4, "clutter_window": 20}
+    s = physics_settings(cfg, cfg.channels[0])
+    assert s["tdma_offset_samples"] == {a.id: 12} and s["interval_s"] == 30
+
+
+def test_physics_coherent_seconds_must_be_whole_intervals(tmp_path):
+    _one(tmp_path, 'grid_square = "EM28"', "")
+    p = tmp_path / "AC0G-T7.toml"
+    p.write_text("[physics]\ncoherent_seconds = 45\n" + p.read_text())
+    with pytest.raises(ConfigError, match="whole number"):
+        load_instance("AC0G-T7", tmp_path)
+
+
+def test_physics_unknown_key_and_bad_tdma_listed(tmp_path):
+    _one(tmp_path, 'grid_square = "EM28"')
+    p = tmp_path / "AC0G-T7.toml"
+    p.write_text("[physics]\nbogus = 1\n" + p.read_text().replace(
+        "transmitters =", "tdma_offset_samples = { NOPE = 1 }\ntransmitters ="))
+    with pytest.raises(ConfigError) as e:
+        load_instance("AC0G-T7", tmp_path)
+    assert "bogus" in str(e.value) and "tdma_offset_samples" in str(e.value)

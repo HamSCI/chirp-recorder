@@ -26,6 +26,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
+    # The parity test runs codar-sounder's own pipeline on the same CPI.
+    # Retires with the physics stopgap.
+    "codar-sounder",
 ]
 
 [project.scripts]
@@ -43,3 +46,4 @@ testpaths = ["tests"]
 ka9q-python = { path = "../ka9q-python", editable = true }
 hamsci-dsp = { path = "../hamsci-dsp", editable = true }
 hs-uploader = { path = "../hs-uploader", editable = true }
+codar-sounder = { path = "../codar-sounder", editable = true }

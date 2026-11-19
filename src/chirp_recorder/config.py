@@ -54,6 +54,7 @@ class InstanceConfig:
     position_source: str    # "precise" | "grid_centre"
     reach_km: tuple = DEFAULT_REACH_KM
     reach_source: str = "default"    # "config" when [picker] reach_km was set
+    physics: dict = field(default_factory=dict)   # the [physics] table, defaults filled in
 
 
 def grid_centre(grid: str) -> tuple[float, float]:
@@ -103,6 +104,52 @@ def _number(v: Any, what: str, lo: float, hi: float, errs: list[str]) -> Optiona
         errs.append(f"[station] {what} = {v} must be finite and within [{lo:g}, {hi:g}]")
         return None
     return v
+
+
+PHYSICS_DEFAULTS = {"enabled": True, "coherent_seconds": 60, "range_min_km": 200,
+                    "range_max_km": 800, "snr_threshold_db": 5.0,
+                    "max_peaks_per_cpi": 4, "clutter_window": 20}
+
+
+def _physics_table(raw: dict, interval_s: float, errs: list[str]) -> dict:
+    """The [physics] table with codar-sounder's defaults and names, checked."""
+    tbl = raw.get("physics") or {}
+    if not isinstance(tbl, dict):
+        errs.append("[physics] must be a table")
+        return dict(PHYSICS_DEFAULTS)
+    out = dict(PHYSICS_DEFAULTS)
+    for k, v in tbl.items():
+        if k not in PHYSICS_DEFAULTS:
+            errs.append(f"[physics] unknown key {k!r}")
+            continue
+        want_bool = k == "enabled"
+        ok = isinstance(v, bool) if want_bool else (
+            isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and v > 0)
+        if not ok:
+            errs.append(f"[physics] {k} = {v!r} must be "
+                        + ("true or false" if want_bool else "a positive number"))
+            continue
+        out[k] = v
+    n = out["coherent_seconds"] / interval_s
+    if abs(n - round(n)) > 1e-9 or n < 1:
+        errs.append(f"[physics] coherent_seconds = {out['coherent_seconds']:g} must hold a "
+                    f"whole number of [processing] interval_s = {interval_s:g} s intervals")
+    if out["range_min_km"] >= out["range_max_km"]:
+        errs.append("[physics] range_min_km must be below range_max_km")
+    return out
+
+
+def physics_settings(cfg: "InstanceConfig", channel: ChannelPlan) -> dict:
+    """What PhysicsStopgap takes for one channel: the [physics] keys, the
+    interval, and tdma_offset_samples from the channel's raw block
+    (pre-flight C17)."""
+    offsets: dict[str, int] = {}
+    for blk in cfg.raw.get("channel") or []:
+        if isinstance(blk, dict) and blk.get("name") == channel.name:
+            offsets = {k: int(v) for k, v in (blk.get("tdma_offset_samples") or {}).items()}
+    return {**cfg.physics, "interval_s": cfg.interval_s, "tdma_offset_samples": offsets,
+            "receiver_lat": cfg.receiver_lat, "receiver_lon": cfg.receiver_lon}
 
 
 def load_instance(key: str, etc: Path = DEFAULT_ETC,
@@ -164,6 +211,7 @@ def load_instance(key: str, etc: Path = DEFAULT_ETC,
             or not math.isfinite(interval_s) or interval_s <= 0:
         errs.append(f"[processing] interval_s = {interval_s!r} must be a positive number")
         interval_s = 30
+    physics = _physics_table(raw, float(interval_s), errs)
     pk = raw.get("picker") or {}
     phase = pk.get("phase", "establish")
     max_channels = pk.get("max_channels", 2)
@@ -241,6 +289,15 @@ def load_instance(key: str, etc: Path = DEFAULT_ETC,
         if not isinstance(ids, list) or not ids or not all(isinstance(x, str) for x in ids):
             errs.append(f"{label}: transmitters must be a non-empty list of ids"); bad = True
             ids = []
+        tdma = blk.get("tdma_offset_samples", {})
+        if not isinstance(tdma, dict) or not all(
+                isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)
+                and v >= 0 for k, v in tdma.items()):
+            errs.append(f"{label}: tdma_offset_samples must be a table of "
+                        "transmitter id = whole number of samples")
+        elif set(tdma) - set(ids):
+            errs.append(f"{label}: tdma_offset_samples names "
+                        f"{sorted(set(tdma) - set(ids))}, not among its transmitters")
         unknown = [x for x in ids if x not in seed]
         for x in unknown:
             errs.append(f"{label}: transmitter {x} is not in the seed catalogue")
@@ -262,4 +319,5 @@ def load_instance(key: str, etc: Path = DEFAULT_ETC,
         key=key, reporter_id=rid, receiver_lat=lat, receiver_lon=lon, grid=grid,
         output_dir=out_dir, interval_s=float(interval_s), channels=channels,
         picker_phase=phase, max_channels=max_channels, raw=raw,
-        position_source=source, reach_km=reach_table, reach_source=reach_source)
+        position_source=source, reach_km=reach_table, reach_source=reach_source,
+        physics=physics)
