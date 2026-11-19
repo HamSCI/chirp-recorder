@@ -10,7 +10,7 @@ come from hamsci-dsp.  Pure function: no clock reads, no I/O.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Optional
 
@@ -54,6 +54,7 @@ class Arrival:
     overlap_flag: bool = False   # see _overlaps: resolved overlaps only; sub-cell multipath biases the delay unflagged
     tau_uncorrected_ns: Optional[int] = None    # None reads as "equal to tau_ns"
     doppler_ambiguous: bool = False   # |doppler| > 0.4/P: delay not corrected
+    slow: Optional[tuple] = field(default=None, compare=False, repr=False)   # per-sweep complex series at the arrival (PhaseStore)
 
     def __post_init__(self):
         if self.tau_uncorrected_ns is None:
@@ -333,7 +334,8 @@ def detect_group(samples: np.ndarray, *, fs: int, channel_centre_hz: float,
             level_db=float(c.level_db), margin_db=float(margin), half_band_db=float(hb),
             clean_tag=c.tag, doppler_hz=dop, phase_rate=rate, carrier_phase_rad=cph,
             s4=float(sc.s4_index) if known else None,
-            sigma_phi_rad=float(sc.sigma_phi_rad) if known else None))
+            sigma_phi_rad=float(sc.sigma_phi_rad) if known else None,
+            slow=tuple(np.asarray(v).tolist())))
     arrivals = [replace(a, overlap_flag=_overlaps(c, comps, wf, fs, a.delay_sigma_ns, dops, m))
                 for a, c in zip(arrivals, kept)]
     return GroupResult(group, m, null_max, null_med, gate, arrivals, rejected,

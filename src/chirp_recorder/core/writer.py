@@ -132,7 +132,7 @@ class RowWriter(threading.Thread):
         self.phase_store = phase_store
         self._q: queue.Queue = queue.Queue(maxsize=queue_max)
         self._stats = {"written": 0, "sink_failures": 0, "queue_full": 0,
-                       "jsonl_failures": 0, "spots_skipped": 0}
+                       "jsonl_failures": 0, "spots_skipped": 0, "put_after_close": 0}
         self._lock = threading.Lock()
         self._closed = False
         self._jsonl_lock = threading.Lock()
@@ -152,6 +152,9 @@ class RowWriter(threading.Thread):
         """Write the rows' canonical JSONL copy now, then queue the batch for
         the sink.  Never blocks on the sink: a full queue drops only the sink
         copy and counts it."""
+        if self._closed:
+            self._bump("put_after_close")
+            return
         arrivals = list(arrivals)
         self._jsonl(arrivals, capture)
         try:

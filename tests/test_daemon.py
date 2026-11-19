@@ -357,3 +357,99 @@ def test_stop_joins_workers_and_closes_the_writer(two_channel_cfg, fake_sources,
     ws, wr = d.workers, d._writer
     d.stop()
     assert not any(w.is_alive() for w in ws) and not wr.is_alive()
+
+
+# --- fix round 1 ---------------------------------------------------------------
+
+def test_chain_delay_uses_the_radiod_id_not_the_status_name(tmp_path):
+    from chirp_recorder.core.timing import chain_delay_from_env, radiod_id_for_status
+    env = tmp_path / "coordination.env"
+    env.write_text("RADIOD_BEE3_RX888_STATUS=bee3-rx888-status.local\n"
+                   "RADIOD_BEE3_RX888_CHAIN_DELAY_NS=4250\n")
+    rid = radiod_id_for_status("bee3-rx888-status.local", env)
+    assert rid == "BEE3_RX888"
+    assert chain_delay_from_env(rid, env) == 4250
+    assert radiod_id_for_status("other-status.local", env) == "other-status"
+
+
+def test_worker_gets_the_chain_delay(two_channel_cfg, fake_sources, made, tmp_path, monkeypatch):
+    env = tmp_path / "coord.env"
+    env.write_text("RADIOD_OMNI_STATUS=omni-status.local\nRADIOD_OMNI_CHAIN_DELAY_NS=777\n")
+    from chirp_recorder.core import timing
+    monkeypatch.setattr(timing, "COORDINATION_ENV", env)
+    monkeypatch.setattr(timing.radiod_id_for_status, "__defaults__", (env,))
+    monkeypatch.setattr(timing.chain_delay_from_env, "__defaults__", (env,))
+    d = build(made, fake_sources, two_channel_cfg, source_factory=fake_sources.ok)
+    d.start_workers()
+    assert d.worker("c4463").tie.chain_delay_ns == 777
+
+
+def test_arrivals_feed_the_phase_store(two_channel_cfg, fake_sources, made, monkeypatch):
+    from chirp_recorder.core.detect import Arrival
+
+    def det(samples, *, fs, channel_centre_hz, group):
+        a = Arrival(tau_ns=1234, delay_sigma_ns=5.0, level_db=20.0, margin_db=9.0,
+                    half_band_db=1.0, clean_tag="A", doppler_hz=None, phase_rate=None,
+                    carrier_phase_rad=None, s4=None, sigma_phi_rad=None,
+                    slow=tuple(complex(1, k) for k in range(4)))
+        return GroupResult(group, 4, -40.0, -45.0, None, [a], {})
+    monkeypatch.setattr(dm, "detect_group", det)
+    d = build(made, fake_sources, two_channel_cfg, source_factory=fake_sources.ok)
+    d.start_workers()
+    fake_sources.run_for(2)
+    d.stop()
+    files = list((two_channel_cfg.output_dir / "phase").rglob("*.jsonl"))
+    assert files
+    rec = json.loads(files[0].read_text().splitlines()[0])
+    assert rec["tau_ns"] == 1234 and len(rec["phase_rad"]) == 4
+
+
+def test_zero_admitted_exits_one(two_channel_cfg, fake_sources, made, caplog):
+    hot = lambda: Headroom(8, 0.5, 50.0, 0.0, 16 * GiB, 12 * GiB, None)   # noqa: E731
+    d = build(made, fake_sources, two_channel_cfg, headroom_reader=hot,
+              source_factory=fake_sources.ok)
+    assert d.run() == 1
+    assert "admitted no channel" in caplog.text
+
+
+def test_failure_traceback_logged_once_per_spell(two_channel_cfg, fake_sources, made, caplog):
+    d = build(made, fake_sources, two_channel_cfg, source_factory=fake_sources.fail_on("c4463"))
+    d.start_workers()
+    end = time.monotonic() + 3
+    while d.worker("c4463").stats["failures"] < 3 and time.monotonic() < end:
+        time.sleep(0.01)
+    recs = [r for r in caplog.records if "c4463" in r.getMessage() and r.levelno == logging.ERROR
+            and "failed" in r.getMessage()]
+    assert len(recs) >= 3
+    assert sum(1 for r in recs if r.exc_info) == 1
+
+
+def test_bad_interval_keeps_the_source(two_channel_cfg, fake_sources, made, monkeypatch):
+    calls = {"n": 0}
+
+    def det(samples, *, fs, channel_centre_hz, group):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("bad")
+        return GroupResult(group, 3, -40.0, -45.0, None, [], {})
+    monkeypatch.setattr(dm, "detect_group", det)
+    d = build(made, fake_sources, two_channel_cfg, source_factory=fake_sources.ok)
+    d.start_workers()
+    fake_sources.run_for(2)
+    w = d.worker("c4463")
+    assert w.stats["failures"] >= 1 and w.stats["restarts"] == 0 and w.stats["delivered"] >= 2
+
+
+def test_stop_before_source_is_known_and_put_after_close(two_channel_cfg, fake_sources, made):
+    d = build(made, fake_sources, two_channel_cfg, source_factory=fake_sources.ok)
+    d.start_workers()
+    wr = d._writer
+    d.stop()
+    wr.put(None, [], [])
+    assert wr.stats["put_after_close"] == 1
+    w = ChannelWorker(d.cfg.channels[0], source_factory=fake_sources.ok, tie=None, writer=wr,
+                      interval_s=30, reporter_id="X", version="1")
+    n = len(fake_sources.created)
+    w.stop()
+    w.run()                                  # returns at once; no source is started
+    assert len(fake_sources.created) == n

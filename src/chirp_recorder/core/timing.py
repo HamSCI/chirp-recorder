@@ -84,6 +84,22 @@ def _env_key(radiod_id: str) -> str:
     return "".join(out).strip("_")
 
 
+def radiod_id_for_status(status: str, path: Path = COORDINATION_ENV) -> str:
+    """The radiod id sigmond files `status` under: the `<id>` of the
+    `RADIOD_<id>_STATUS=<dns>` line whose value names the same radiod.  With no
+    such line, the status name without its `.local` suffix."""
+    want = normalise_status(status)
+    try:
+        for line in Path(path).read_text().splitlines():
+            k, sep, v = line.strip().partition("=")
+            if (sep and k.startswith("RADIOD_") and k.endswith("_STATUS")
+                    and normalise_status(v.strip().strip("'\"")) == want):
+                return k[len("RADIOD_"):-len("_STATUS")]
+    except OSError:
+        pass
+    return want
+
+
 def chain_delay_from_env(radiod_id: str, path: Path = COORDINATION_ENV) -> Optional[int]:
     """`RADIOD_<id>_CHAIN_DELAY_NS` from coordination.env, or None."""
     key = f"RADIOD_{_env_key(radiod_id)}_CHAIN_DELAY_NS"

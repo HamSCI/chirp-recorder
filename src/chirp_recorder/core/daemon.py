@@ -29,7 +29,10 @@ from chirp_recorder.core.channels import ChannelPlan
 from chirp_recorder.core.detect import detect_group
 from chirp_recorder.core.rows import rows_for_group
 from chirp_recorder.core.source import RawChannelSource
-from chirp_recorder.core.timing import COORDINATION_ENV, Tie, chain_delay_from_env
+from chirp_recorder.core.timing import (COORDINATION_ENV, Tie, chain_delay_from_env,
+                                        radiod_id_for_status)
+from hamsci_dsp import sigmondb_rows as sr
+from chirp_recorder.physics.stopgap import utc_datetime
 from chirp_recorder.core.writer import PhaseStore, RowWriter, make_sink_writers
 
 log = logging.getLogger(__name__)
@@ -79,6 +82,7 @@ class ChannelWorker(threading.Thread):
         self._clock = clock
         self._stop_evt = threading.Event()
         self._source = None
+        self._spell_logged = False
         self._lock = threading.Lock()
         self.last_interval_at: Optional[float] = None
         self._stats = {"delivered": 0, "failures": 0, "restarts": 0,
@@ -116,14 +120,20 @@ class ChannelWorker(threading.Thread):
             try:
                 src = self.source_factory(self.plan, interval_s=self.interval_s)
                 self._source = src
+                if self._stop_evt.is_set():       # stop() came before the source was known
+                    break
                 for iv in src.intervals():
                     if self._stop_evt.is_set():
                         break
-                    self._handle(iv)
+                    try:
+                        self._handle(iv)
+                        self._spell_logged = False
+                    except Exception as exc:  # noqa: BLE001 - one bad interval keeps the source
+                        self._bump("failures")
+                        self._log_failure("interval failed", exc, restart=False)
             except Exception as exc:  # noqa: BLE001 - a channel never takes the daemon down
                 self._bump("failures")
-                log.error("channel %s failed: %s; restarting its source in %.0f s",
-                          self.plan.name, exc, self.restart_delay_s, exc_info=True)
+                self._log_failure("source failed", exc, restart=True)
             finally:
                 self._source = None
                 if src is not None:
@@ -139,6 +149,15 @@ class ChannelWorker(threading.Thread):
             except Exception as exc:  # noqa: BLE001
                 log.warning("channel %s: physics close failed: %s", self.plan.name, exc)
 
+    def _log_failure(self, what: str, exc: Exception, *, restart: bool) -> None:
+        """The traceback once per failure spell, then one line each time."""
+        tail = f"; restarting its source in {self.restart_delay_s:.0f} s" if restart else ""
+        if not self._spell_logged:
+            self._spell_logged = True
+            log.error("channel %s %s: %s%s", self.plan.name, what, exc, tail, exc_info=True)
+        else:
+            log.error("channel %s %s again: %s%s", self.plan.name, what, exc, tail)
+
     def _handle(self, iv) -> None:
         label = self.tie.label(iv)
         detector_version = f"chirp-recorder/{self.version}"
@@ -153,7 +172,19 @@ class ChannelWorker(threading.Thread):
                 detector_version=detector_version,
                 input_epoch_gps_s=iv.input_epoch_gps_s, interval_s=self.interval_s,
                 position_source=self.position_source)
-            self.writer.put(capture, arrivals, [])
+            phases = []
+            period_s = group.waveform.period_s
+            for i, a in enumerate(result.arrivals):
+                if a.slow is None:
+                    continue
+                _, delay_ns = sr.split_arrival(int(label.utc_ns) + int(a.tau_ns), period_s)
+                phases.append(dict(
+                    group=arrivals[i]["group_key"],
+                    cpi_start_utc=utc_datetime(label.utc_ns), radiod=self.plan.status,
+                    sweep_start_ns=int(label.utc_ns), bin=i, period_s=period_s,
+                    tau_ns=int(a.tau_ns), delay_ns=int(delay_ns), level_db=a.level_db,
+                    slow=a.slow))
+            self.writer.put(capture, arrivals, phases)
             n_rows += len(arrivals) + 1
         spots = 0
         if self.physics is not None:
@@ -245,7 +276,7 @@ class Daemon:
 
     def _start_worker(self, plan: ChannelPlan) -> ChannelWorker:
         tie = Tie(radiod_status=plan.status,
-                  chain_delay_ns=chain_delay_from_env(plan.status))
+                  chain_delay_ns=chain_delay_from_env(radiod_id_for_status(plan.status)))
         w = ChannelWorker(
             plan, source_factory=self.source_factory, tie=tie, writer=self._ensure_writer(),
             interval_s=self.cfg.interval_s, reporter_id=self.cfg.reporter_id,
@@ -293,6 +324,9 @@ class Daemon:
             log.error("instance %s records %d of %d channels; refused: %s", self.cfg.key,
                       len(adm.admitted), len(self.cfg.channels),
                       ", ".join(p.name for p, _ in adm.refused))
+        if not self._workers:
+            log.error("instance %s admitted no channel (see the refusals above); "
+                      "exiting so systemd retries admission", self.cfg.key)
         self._send_ready()
 
     def _send_ready(self) -> None:
@@ -368,8 +402,12 @@ class Daemon:
         path = applied_state_path(self.cfg.output_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
-        tmp.write_text(json.dumps(self.applied_state(), indent=2, sort_keys=True) + "\n")
-        os.replace(tmp, path)
+        try:
+            tmp.write_text(json.dumps(self.applied_state(), indent=2, sort_keys=True) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     def startup_report(self) -> list[str]:
         lines = [self._describe(w.plan) for w in self._workers]
@@ -412,6 +450,8 @@ class Daemon:
         signal.signal(signal.SIGHUP, lambda *_: self.on_sighup())
         try:
             self.start_workers()
+            if not self._workers:
+                return 1
             while not self._stop_evt.wait(TICK_S):
                 self._service_hup()
                 self.tick(self.clock())
@@ -425,6 +465,8 @@ class Daemon:
             w.stop()
         for w in self._workers:
             w.join(timeout=10)
+            if w.is_alive():
+                log.warning("channel %s did not stop within 10 s", w.plan.name)
         if self._writer is not None:
             self._writer.close()
             self._writer = None
