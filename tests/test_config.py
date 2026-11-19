@@ -143,3 +143,26 @@ def test_non_table_sections_join_the_problem_list(tmp_path):
     with pytest.raises(ConfigError) as e:
         load_instance("AC0G-T7", tmp_path)
     assert "[station] must be a table" in str(e.value) and "must be a table" in str(e.value).split("[station]")[1]
+
+
+def _picker(tmp_path, body):
+    return _one(tmp_path, "receiver_lat = 38.0\nreceiver_lon = -95.0",
+                "[picker]\n" + body)
+
+
+def test_picker_reach_km_loads(tmp_path):
+    cfg = load_instance("AC0G-T7", _picker(
+        tmp_path, "reach_km = [[3e6, 6e6, 500.0], [6e6, 60e6, 100.0]]"))
+    assert cfg.reach_km == ((3e6, 6e6, 500.0), (6e6, 60e6, 100.0))
+    assert cfg.reach_source == "config"
+
+
+def test_picker_reach_km_defaults(tmp_path):
+    from chirp_recorder.core.picker import DEFAULT_REACH_KM
+    cfg = load_instance("AC0G-T7", _picker(tmp_path, "phase = \"spread\""))
+    assert cfg.reach_km == DEFAULT_REACH_KM and cfg.reach_source == "default"
+
+
+def test_picker_reach_km_inverted_row_refused(tmp_path):
+    with pytest.raises(ConfigError, match="reach_km"):
+        load_instance("AC0G-T7", _picker(tmp_path, "reach_km = [[6e6, 3e6, 500.0]]"))

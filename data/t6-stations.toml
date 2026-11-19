@@ -1,0 +1,39 @@
+# T6 stations for chirp-recorder's picker.  Regenerate with
+# scripts/rebuild-t6-stations.py.  Do not edit.
+# Positions are 6-character grid-square CENTRES, never precise.
+as_of = "2026-11-19"
+
+[stations."AC0G/B1A"]
+grid = "EM38ww"
+lat = 38.9375
+lon = -92.125
+
+[stations."AC0G/B4"]
+grid = "EM38ww"
+lat = 38.9375
+lon = -92.125
+
+[stations."AC0G/ND"]
+grid = "EN16ov"
+lat = 46.89583
+lon = -96.79167
+
+[stations."K3LR/D"]
+grid = "EN91se"
+lat = 41.1875
+lon = -80.45833
+
+[stations."N8UR"]
+grid = "EM79vr"
+lat = 39.72917
+lon = -84.20833
+
+[stations."W2NAF"]
+grid = "FN21ei"
+lat = 41.35417
+lon = -75.625
+
+[stations."WB6CXC/7"]
+grid = "CN88lm"
+lat = 48.52083
+lon = -123.04167

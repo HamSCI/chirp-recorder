@@ -21,6 +21,7 @@ from chirp_recorder._reporter_id import to_key
 from chirp_recorder.core.catalogue import Transmitter, load_seed
 from chirp_recorder.core.channels import (SAMPLE_RATES_HZ, ChannelPlan,
                                           channel_errors, groups_for)
+from chirp_recorder.core.picker import DEFAULT_REACH_KM
 
 try:
     import tomllib
@@ -51,6 +52,8 @@ class InstanceConfig:
     max_channels: int
     raw: dict
     position_source: str    # "precise" | "grid_centre"
+    reach_km: tuple = DEFAULT_REACH_KM
+    reach_source: str = "default"    # "config" when [picker] reach_km was set
 
 
 def grid_centre(grid: str) -> tuple[float, float]:
@@ -75,6 +78,20 @@ def grid_centre(grid: str) -> tuple[float, float]:
         lon += 1.0
         lat += 0.5
     return lat, lon
+
+
+def grid6(lat: float, lon: float) -> str:
+    """6-character Maidenhead square holding (lat, lon)."""
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        raise ValueError(f"position {lat}, {lon} is out of range")
+    lon_f = min(lon + 180, 360 - 1e-9)
+    lat_f = min(lat + 90, 180 - 1e-9)
+    f_lon, f_lat = int(lon_f // 20), int(lat_f // 10)
+    s_lon, s_lat = int((lon_f % 20) // 2), int(lat_f % 10)
+    u_lon = int(((lon_f % 2) * 12) // 1)
+    u_lat = int(((lat_f % 1) * 24) // 1)
+    return (chr(65 + f_lon) + chr(65 + f_lat) + str(s_lon) + str(s_lat)
+            + chr(97 + u_lon) + chr(97 + u_lat))
 
 
 def _number(v: Any, what: str, lo: float, hi: float, errs: list[str]) -> Optional[float]:
@@ -157,6 +174,31 @@ def load_instance(key: str, etc: Path = DEFAULT_ETC,
         errs.append(f"[picker] max_channels = {max_channels!r} must be a whole number >= 1")
         max_channels = 2
 
+    reach_table = DEFAULT_REACH_KM
+    reach_source = "default"
+    if "reach_km" in pk:
+        rk = pk["reach_km"]
+        parsed = []
+        ok = isinstance(rk, list) and bool(rk)
+        for row in (rk if ok else []):
+            if (not isinstance(row, list) or len(row) != 3 or not all(
+                    isinstance(x, (int, float)) and not isinstance(x, bool)
+                    and math.isfinite(x) for x in row)):
+                ok = False
+                break
+            parsed.append(tuple(float(x) for x in row))
+        if not ok:
+            errs.append("[picker] reach_km must be a list of [low_hz, high_hz, km] rows")
+        else:
+            for lo, hi, km in parsed:
+                if not (0 < lo < hi) or km <= 0:
+                    errs.append(f"[picker] reach_km row [{lo:g}, {hi:g}, {km:g}]: "
+                                "low edge must be positive and below the high edge, "
+                                "and km positive")
+            if not any("reach_km row" in e for e in errs):
+                reach_table = tuple(parsed)
+                reach_source = "config"
+
     # channels
     if seed is None:
         try:
@@ -220,4 +262,4 @@ def load_instance(key: str, etc: Path = DEFAULT_ETC,
         key=key, reporter_id=rid, receiver_lat=lat, receiver_lon=lon, grid=grid,
         output_dir=out_dir, interval_s=float(interval_s), channels=channels,
         picker_phase=phase, max_channels=max_channels, raw=raw,
-        position_source=source)
+        position_source=source, reach_km=reach_table, reach_source=reach_source)
