@@ -107,23 +107,42 @@ _NO_SAMPLES = {"empty_payload", "stream_start"}      # gap reports that insert n
 class _KaStream:
     """Adapter from ka9q-python's RadiodStream to (on_packet, on_lost).
 
-    ka9q-python zero-fills lost packets, so a batch stays on the RTP grid.
-    Each zero-filled region goes to on_lost on its own; the clean samples on
-    either side go to on_packet with their true RTP, so a gap costs the
-    interval it falls in and no neighbour.  A gap whose position falls
-    outside its batch condemns the whole batch (the split cannot be trusted).
-    Reports that insert no samples (EMPTY_PAYLOAD) condemn nothing.  A batch
-    without `delivered_rtp_start` is never given an RTP from a running count
-    (that disables the continuity check, the bug codar-sounder 344457b fixed):
-    it is logged as an ERROR and passed to on_lost when its place is known.
+    ka9q-python zero-fills lost packets, and radiod drops a block as a packet
+    of exact zeros.  The gap positions ka9q-python reports are not trustworthy
+    (3.27.0 counts lost-packet output twice in `cumulative_samples`, so every
+    reported position after the first loss lands late).  So the adapter finds
+    the filled spans itself: runs of exact complex zeros at least `min_zero_run`
+    long (F32 IQ from a receiver never holds one).  Each run goes to on_lost on
+    its own; the clean samples either side go to on_packet with their true RTP.
+    A clean piece therefore never holds a packet-length run of zeros.
+
+    Where the batch's own report and the batch disagree (a reported gap with no
+    zero run, or a different count of runs), the whole batch goes to on_lost.
+    A zero run the stream never reported is a gap all the same.  Reports that
+    insert no samples (EMPTY_PAYLOAD) condemn nothing.  A batch without
+    `delivered_rtp_start` is never given an RTP from a running count (that
+    disables the continuity check, the bug codar-sounder 344457b fixed): it is
+    logged as an ERROR and passed to on_lost when its place is known.
     """
 
-    def __init__(self, channel_info, on_packet, on_lost, _stream_cls=None):
+    def __init__(self, channel_info, on_packet, on_lost, _stream_cls=None,
+                 min_zero_run: int = 64):
         if _stream_cls is None:
             from ka9q.stream import RadiodStream as _stream_cls
         self._on_packet, self._on_lost = on_packet, on_lost
+        self._min_zero_run = int(min_zero_run)
         self._next: Optional[int] = None
         self._stream = _stream_cls(channel=channel_info, on_samples=self._on_samples)
+
+    def _zero_runs(self, samples) -> list[tuple[int, int]]:
+        arr = np.asarray(samples)
+        if arr.size == 0:
+            return []
+        z = (arr.real == 0) & (arr.imag == 0) if np.iscomplexobj(arr) else (arr == 0)
+        edges = np.diff(np.concatenate(([0], z.view(np.int8), [0])))
+        starts, ends = np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)
+        return [(int(a), int(b - a)) for a, b in zip(starts, ends)
+                if b - a >= self._min_zero_run]
 
     def _on_samples(self, samples, quality) -> None:
         n = len(samples)
@@ -138,29 +157,26 @@ class _KaStream:
             return
         rtp0 = int(rtp0) & _MASK
         self._next = (rtp0 + n) & _MASK
-        start = getattr(quality, "batch_start_sample", None)
-        regions: list[tuple[int, int]] = []        # (offset, length) of zero-filled spans
-        for g in list(getattr(quality, "batch_gaps", None) or []):
-            if getattr(g.source, "value", g.source) in _NO_SAMPLES:
-                continue
-            dur = int(g.duration_samples)
-            off = None if start is None else int(g.position_samples) - int(start)
-            if off is None or off < 0 or off > n:
-                log.error("gap report (%d samples) lies outside its batch; the "
-                          "whole batch of %d samples is discarded", dur, n)
-                self._on_lost(rtp0, n, [dur])
-                return
-            regions.append((off, min(dur, n - off)))
-        if not regions:
+        reported = [g for g in (getattr(quality, "batch_gaps", None) or [])
+                    if getattr(g.source, "value", g.source) not in _NO_SAMPLES]
+        runs = self._zero_runs(samples)
+        if reported and len(runs) != len(reported):
+            log.error("batch of %d samples reports %d gap(s) but holds %d run(s) of "
+                      "exact zeros; the whole batch is discarded", n, len(reported),
+                      len(runs))
+            self._on_lost(rtp0, n, [int(g.duration_samples) for g in reported])
+            return
+        if runs and not reported:
+            log.error("batch of %d samples holds %d unreported run(s) of exact "
+                      "zeros; they are treated as gaps", n, len(runs))
+        if not runs:
             self._on_packet(rtp0, samples)
             return
         pos = 0
-        for off, ln in sorted(regions):
-            off = max(off, pos)
+        for off, ln in runs:
             if off > pos:
                 self._on_packet((rtp0 + pos) & _MASK, samples[pos:off])
-            if ln > 0:
-                self._on_lost((rtp0 + off) & _MASK, ln, [ln])
+            self._on_lost((rtp0 + off) & _MASK, ln, [ln])
             pos = off + ln
         if pos < n:
             self._on_packet((rtp0 + pos) & _MASK, samples[pos:])
@@ -230,6 +246,7 @@ class RawChannelSource:
         self._stream = None
         self._poller: Optional[threading.Thread] = None
         self._released = False
+        self._fatal: Optional[Exception] = None
 
     @property
     def stats(self) -> dict:
@@ -397,9 +414,13 @@ class RawChannelSource:
         info = self._control.ensure_channel(**self._ensure_kwargs)
         self._last_ensure_t = self._clock()
         if info.ssrc != self._ssrc:
-            log.warning("ensure_channel for %s returned ssrc %s (was %s)",
-                        self.plan.name, info.ssrc, self._ssrc)
-            self._ssrc = info.ssrc
+            log.error("ensure_channel for %s returned ssrc %s, not %s: the running "
+                      "stream follows the old one; the source stops", self.plan.name,
+                      info.ssrc, self._ssrc)
+            self._fatal = RuntimeError(f"channel {self.plan.name} changed ssrc "
+                                       f"{self._ssrc} -> {info.ssrc} on re-ensure")
+            self._stopped.set()
+            raise self._fatal
         return info
 
     def _plausible(self, rtp_timesnap: int) -> bool:
@@ -592,6 +613,8 @@ class RawChannelSource:
                     continue
                 self._bump("delivered")
                 yield iv
+            if self._fatal is not None:
+                raise self._fatal
         finally:
             self._stopped.set()
             self._release()

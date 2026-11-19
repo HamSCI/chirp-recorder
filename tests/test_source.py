@@ -276,19 +276,68 @@ def _gap(src, pos, dur):
     return SimpleNamespace(source=src, position_samples=pos, duration_samples=dur)
 
 
+def _batch(n, *zero_spans):
+    a = np.ones(n, np.complex64) * (1 + 2j)
+    for off, ln in zero_spans:
+        a[off:off + ln] = 0
+    return a
+
+
 def test_kastream_gap_costs_only_its_span():
     calls = []
     ka = _ka(calls)
-    ka._on_samples(np.zeros(1000, np.complex64),
+    ka._on_samples(_batch(1000, (300, 200)),
                    _q(5_000, 100, [_gap(GapSource.NETWORK_LOSS, 400, 200)]))
     assert calls == [("pkt", 5_000, 300), ("lost", 5_300, 200, (200,)),
                      ("pkt", 5_500, 500)]
 
 
+def test_kastream_ignores_a_wrong_reported_position():
+    # ka9q-python 3.27.0 reports positions late after a loss: here by 200
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(_batch(1000, (300, 200)),
+                   _q(5_000, 100, [_gap(GapSource.NETWORK_LOSS, 600, 200)]))
+    assert calls == [("pkt", 5_000, 300), ("lost", 5_300, 200, (200,)),
+                     ("pkt", 5_500, 500)]
+
+
+def test_kastream_reported_gap_without_a_zero_run_condemns_the_batch():
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(_batch(500),
+                   _q(3_000, 0, [_gap(GapSource.NETWORK_LOSS, 9_999, 50)]))
+    assert calls == [("lost", 3_000, 500, (50,))]
+
+
+def test_kastream_run_count_disagreement_condemns_the_batch():
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(_batch(1000, (100, 100)),
+                   _q(3_000, 0, [_gap(GapSource.NETWORK_LOSS, 100, 100),
+                                 _gap(GapSource.NETWORK_LOSS, 600, 100)]))
+    assert calls == [("lost", 3_000, 1000, (100, 100))]
+
+
+def test_kastream_unreported_zero_run_is_never_shipped_clean():
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(_batch(600, (200, 150)), _q(7_000, 0))
+    assert calls == [("pkt", 7_000, 200), ("lost", 7_200, 150, (150,)),
+                     ("pkt", 7_350, 250)]
+
+
+def test_kastream_short_zero_runs_are_signal():
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(_batch(600, (200, 10)), _q(7_000, 0))
+    assert calls == [("pkt", 7_000, 600)]
+
+
 def test_kastream_empty_payload_condemns_nothing():
     calls = []
     ka = _ka(calls)
-    ka._on_samples(np.ones(640, np.complex64),
+    ka._on_samples(_batch(640),
                    _q(1_000, 0, [_gap(GapSource.EMPTY_PAYLOAD, 100, 320)]))
     assert calls == [("pkt", 1_000, 640)]
 
@@ -297,16 +346,51 @@ def test_kastream_missing_rtp_start_is_loud_and_never_synthesised(caplog):
     caplog.set_level(logging.ERROR)
     calls = []
     ka = _ka(calls)
-    ka._on_samples(np.ones(100, np.complex64), _q(None, 0))       # nowhere to place it
+    ka._on_samples(_batch(100), _q(None, 0))       # nowhere to place it
     assert calls == [] and "no delivered_rtp_start" in caplog.text
-    ka._on_samples(np.ones(100, np.complex64), _q(2_000, 0))
-    ka._on_samples(np.ones(100, np.complex64), _q(None, 100))
+    ka._on_samples(_batch(100), _q(2_000, 0))
+    ka._on_samples(_batch(100), _q(None, 100))
     assert calls == [("pkt", 2_000, 100), ("lost", 2_100, 100, (100,))]
 
 
-def test_kastream_gap_outside_its_batch_condemns_the_batch():
-    calls = []
+def test_kastream_with_the_real_resequencer_ships_no_hole():
+    """Drive ka9q-python's own resequencer through two lost packets (the
+    reviewer's double-count case) and feed each emitted chunk, with the
+    quality it would carry, to the adapter."""
+    from ka9q.resequencer import PacketResequencer, RTPPacket
+    per = 100
+    rs = PacketResequencer(buffer_size=8, samples_per_packet=per, sample_rate=16_000)
+    calls, delivered = [], 0
     ka = _ka(calls)
-    ka._on_samples(np.ones(500, np.complex64),
-                   _q(3_000, 0, [_gap(GapSource.NETWORK_LOSS, 9_999, 50)]))
-    assert calls == [("lost", 3_000, 500, (50,))]
+    ka._min_zero_run = per
+    lost_seq = {10, 40}
+    for seq in range(80):
+        if seq in lost_seq:
+            continue
+        sig = (np.ones(per) * (1 + seq) + 1j).astype(np.complex64)
+        out, gaps = rs.process_packet(RTPPacket(seq, seq * per, 1, sig))
+        if out is not None and len(out):
+            ka._on_samples(out, _q(rs.last_chunk_rtp_start, delivered, gaps))
+            delivered += len(out)
+    pkts = [c for c in calls if c[0] == "pkt"]
+    lost = [c for c in calls if c[0] == "lost"]
+    assert [c[1] for c in lost] == [10 * per, 40 * per] and all(c[2] == per for c in lost)
+    # every shipped piece is signal: its samples cover everything but the holes
+    assert sum(c[2] for c in pkts) == delivered - 2 * per
+    assert sum(c[2] for c in calls) == delivered
+
+
+def test_changed_ssrc_on_re_ensure_stops_the_source(fake_radiod, caplog):
+    caplog.set_level(logging.ERROR)
+    src = fake_radiod(rate=64_000, interval_s=1.0, restart_at_rtp=200_000)
+    orig = src.fake._ensure
+
+    def changing(**kw):
+        info = orig(**kw)
+        if len(src.fake.ensure_calls) > 1:
+            info.ssrc = 0x9999
+        return info
+    src.fake.control.ensure_channel = changing
+    with pytest.raises(RuntimeError, match="changed ssrc"):
+        src.take_all()
+    assert "returned ssrc" in caplog.text
