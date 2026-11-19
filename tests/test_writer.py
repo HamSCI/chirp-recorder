@@ -136,3 +136,40 @@ def test_phase_store_series_stay_on_the_station(tmp_path):
     f = tmp_path / ref
     rec = json.loads(f.read_text().splitlines()[0])
     assert len(rec["phase_rad"]) == 32 and len(rec["amp_db"]) == 32 and rec["delay_ns"] == 5
+
+
+def test_full_queue_keeps_the_jsonl_and_loses_only_the_sink_copy(tmp_path):
+    gate = []
+
+    class Slow(FakeW):
+        def insert(self, rows):
+            while not gate:
+                time.sleep(0.01)
+            super().insert(rows)
+
+    a = Slow()
+    w = RowWriter(output_dir=tmp_path, sink_writers=(a, Slow(), Slow()),
+                  phase_store=None, queue_max=1)
+    cap, arrs = _rows()
+    for _ in range(10):
+        w.put(cap, arrs, [])
+    n_full = w.stats["queue_full"]
+    assert n_full >= 1
+    gate.append(1)
+    w.close()
+    lines = (tmp_path / "rows" / "2026-11-19.jsonl").read_text().splitlines()
+    assert len(lines) == 20 and len(a.rows) == 10 - n_full
+
+
+def test_a_jsonl_failure_never_skips_the_sink(tmp_path):
+    import numpy as np
+    a, c, s = FakeW(), FakeW(), FakeW()
+    w = RowWriter(output_dir=tmp_path, sink_writers=(a, c, s), phase_store=None)
+    cap, arrs = _rows()
+    bad = dict(arrs[0], engineering={"x": object()})
+    npy = dict(arrs[0], delay_sigma_ns=np.float32(2.5))
+    w.put(cap, [bad, npy], [])
+    w.close()
+    st = w.stats
+    assert st["jsonl_failures"] == 1 and st["written"] == 2     # npy row + capture
+    assert len(a.rows) == 2 and len(c.rows) == 1

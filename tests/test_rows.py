@@ -90,3 +90,14 @@ def test_engineering_carries_arrival_fields_and_position_source(result, t6_label
 def test_gate_period_fitted_or_catalogued(result, t6_label):
     cap, _ = rows_for_group(result, label=t6_label, **CALL, **KW)
     assert float(cap["engineering"]["gate_period_us"]) == pytest.approx(1945.6)
+
+
+def test_radiod_basis_label_writes_empty_strings_not_None(result):
+    lab = Label(utc_ns=1_800_000_000_987_654_321, delay_basis="radiod", t_level=None,
+                provenance=sr.provenance(None),
+                engineering={"delay_basis": "radiod", "t_level": None,
+                             "authority_sigma_ns": None, "chain_delay_ns": None})
+    cap, arrs = rows_for_group(result, label=lab, **CALL, **KW)
+    for e in (cap["engineering"], arrs[0]["engineering"]):
+        assert e["t_level"] == "" and e["authority_sigma_ns"] == "" and e["chain_delay_ns"] == ""
+        assert "None" not in e.values()

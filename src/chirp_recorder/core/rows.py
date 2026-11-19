@@ -11,10 +11,12 @@ from hamsci_dsp import sigmondb_rows as sr
 
 
 def _s(v) -> str:
+    if v is None:
+        return ""
     if isinstance(v, bool):
         return "1" if v else "0"
     if isinstance(v, float):
-        return f"{v:g}" if abs(v) < 1e6 else repr(v)
+        return repr(v)
     return str(v)
 
 

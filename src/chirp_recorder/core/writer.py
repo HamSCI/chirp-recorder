@@ -51,6 +51,13 @@ def make_sink_writers() -> Optional[tuple]:
     return None
 
 
+def _json_default(o):
+    """numpy scalars in a row; anything else still raises."""
+    if isinstance(o, np.generic):
+        return o.item()
+    raise TypeError(f"not JSON serialisable: {type(o).__name__}")
+
+
 class PhaseStore:
     """Per-sweep phase and amplitude series, kept on the station.  One JSON
     line per arrival per interval, one file per sweep group per UTC day, under
@@ -108,9 +115,12 @@ class RowWriter(threading.Thread):
         self.sink_writers = sink_writers
         self.phase_store = phase_store
         self._q: queue.Queue = queue.Queue(maxsize=queue_max)
-        self._stats = {"written": 0, "sink_failures": 0, "queue_full": 0}
+        self._stats = {"written": 0, "sink_failures": 0, "queue_full": 0,
+                       "jsonl_failures": 0}
         self._lock = threading.Lock()
         self._closed = False
+        self._jsonl_lock = threading.Lock()
+        self._jsonl_ok = True
         self.start()
 
     @property
@@ -123,9 +133,13 @@ class RowWriter(threading.Thread):
             self._stats[key] += n
 
     def put(self, capture: Optional[dict], arrivals: list, phases: list, spots=()) -> None:
-        """Queue one batch.  Never blocks; a full queue counts and drops it."""
+        """Write the rows' canonical JSONL copy now, then queue the batch for
+        the sink.  Never blocks on the sink: a full queue drops only the sink
+        copy and counts it."""
+        arrivals = list(arrivals)
+        self._jsonl(arrivals, capture)
         try:
-            self._q.put_nowait((capture, list(arrivals), list(phases), list(spots)))
+            self._q.put_nowait((capture, arrivals, list(phases), list(spots)))
         except queue.Full:
             self._bump("queue_full")
 
@@ -159,7 +173,6 @@ class RowWriter(threading.Thread):
                     self.phase_store.write(**kw)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("phase store write failed: %s", exc)
-        self._jsonl(arrivals, capture)
         w = self.sink_writers
         if not w:
             return
@@ -174,17 +187,44 @@ class RowWriter(threading.Thread):
                 log.warning("sink insert failed (%s); JSONL holds the rows", exc)
 
     def _jsonl(self, arrivals, capture) -> None:
+        """Append each row to the day's file.  A bad row counts in
+        jsonl_failures and never stops the others or the sink inserts."""
         by_day: dict = {}
+        ok = True
         for table, row in [("arrival", a) for a in arrivals] + (
                 [("capture", capture)] if capture else []):
-            by_day.setdefault(str(row["time"])[:10], []).append(
-                json.dumps({"table": table, **row}, separators=(",", ":")))
-        for day, lines in by_day.items():
             try:
-                d = self.output_dir / "rows"
-                d.mkdir(parents=True, exist_ok=True)
-                with open(d / f"{day}.jsonl", "a") as fh:
-                    fh.write("\n".join(lines) + "\n")
-                self._bump("written", len(lines))
-            except OSError as exc:
-                log.warning("rows JSONL write failed: %s", exc)
+                line = json.dumps({"table": table, **row}, separators=(",", ":"),
+                                  default=_json_default)
+                by_day.setdefault(str(row["time"])[:10], []).append(line)
+            except Exception as exc:  # noqa: BLE001
+                ok = False
+                self._bump("jsonl_failures")
+                self._jsonl_state(False, exc)
+        with self._jsonl_lock:
+            for day, lines in by_day.items():
+                try:
+                    d = self.output_dir / "rows"
+                    d.mkdir(parents=True, exist_ok=True)
+                    with open(d / f"{day}.jsonl", "a") as fh:
+                        fh.write("\n".join(lines) + "\n")
+                        fh.flush()
+                    self._bump("written", len(lines))
+                except Exception as exc:  # noqa: BLE001
+                    ok = False
+                    self._bump("jsonl_failures", len(lines))
+                    self._jsonl_state(False, exc)
+        if ok:
+            self._jsonl_state(True, None)
+
+    def _jsonl_state(self, ok: bool, exc) -> None:
+        """Log on a change of state, not on every failure."""
+        if ok != self._jsonl_ok:
+            self._jsonl_ok = ok
+            if ok:
+                log.info("rows JSONL writing again")
+        if not ok and not getattr(self, "_jsonl_said", False):
+            self._jsonl_said = True
+            log.warning("rows JSONL write failed (%s); sink inserts continue", exc)
+        elif ok:
+            self._jsonl_said = False
