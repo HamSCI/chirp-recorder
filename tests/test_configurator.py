@@ -199,3 +199,77 @@ def test_interactive_init_prompts(tmp_etc, run_cli, monkeypatch):
 def test_config_edit_prints_in_non_interactive(tmp_etc, configured, run_cli_out):
     out = run_cli_out("config", "edit", "--non-interactive", "--instance", "AC0G-B4")
     assert "[instance]" in out and "AC0G/B4" in out
+
+
+# --- fix round 1 -------------------------------------------------------------
+
+def test_from_codar_prefers_coordination_over_a_stale_file(tmp_etc, run_cli_full,
+                                                           codar_kfs_file, monkeypatch):
+    monkeypatch.setenv("STATION_LAT", "41.5")        # made up; differs from the file's
+    monkeypatch.setenv("STATION_LON", "-90.25")
+    rc, out, err = run_cli_full(*INIT, "--instance", "KFS-MAIN", "--reporter-id", "KFS/MAIN",
+                                "--from-codar", str(codar_kfs_file))
+    assert rc == 0, err
+    cfg = load_instance("KFS-MAIN", tmp_etc)
+    assert (cfg.receiver_lat, cfg.receiver_lon) == (41.5, -90.25)
+    assert "sigmond coordination" in out and "41.5" not in out
+
+
+def test_from_codar_names_the_file_when_coordination_is_empty(tmp_etc, run_cli_full,
+                                                              codar_kfs_file):
+    rc, out, _ = run_cli_full(*INIT, "--instance", "KFS-MAIN", "--reporter-id", "KFS/MAIN",
+                              "--from-codar", str(codar_kfs_file))
+    assert rc == 0 and "codar-sounder file" in out
+
+
+def test_config_is_not_world_readable(tmp_etc, run_cli, monkeypatch):
+    import grp
+    monkeypatch.setenv("STATION_LAT", str(COORD_LAT))
+    monkeypatch.setenv("STATION_LON", str(COORD_LON))
+    monkeypatch.setattr(grp, "getgrnam", lambda n: (_ for _ in ()).throw(KeyError(n)))
+    assert _init(run_cli) == 0
+    assert (tmp_etc / "AC0G-B4.toml").stat().st_mode & 0o777 == 0o600
+    assert not list(tmp_etc.glob("*.part"))
+
+
+def test_config_group_readable_when_chirprec_exists(tmp_etc, run_cli, monkeypatch):
+    import grp
+    import os
+    from types import SimpleNamespace
+    monkeypatch.setenv("STATION_GRID", "EM38ww")
+    monkeypatch.setattr(grp, "getgrnam", lambda n: SimpleNamespace(gr_gid=os.getgid()))
+    assert _init(run_cli) == 0
+    assert (tmp_etc / "AC0G-B4.toml").stat().st_mode & 0o777 == 0o640
+
+
+def test_part_file_removed_on_failure(tmp_etc, run_cli, monkeypatch):
+    from pathlib import Path
+    monkeypatch.setenv("STATION_GRID", "EM38ww")
+    real = Path.replace
+
+    def boom(self, target):
+        if str(self).endswith(".part"):
+            raise OSError("disk full")
+        return real(self, target)
+    monkeypatch.setattr(Path, "replace", boom)
+    try:
+        _init(run_cli)
+    except OSError:
+        pass
+    assert not list(tmp_etc.glob("*.part"))
+
+
+def test_from_codar_warns_when_radiod_status_is_ignored(tmp_etc, run_cli_full, codar_kfs_file):
+    rc, _, err = run_cli_full(*INIT, "--instance", "KFS-MAIN", "--reporter-id", "KFS/MAIN",
+                              "--radiod-status", "other-status.local",
+                              "--from-codar", str(codar_kfs_file))
+    assert rc == 0 and "ignored" in err
+    assert load_instance("KFS-MAIN", tmp_etc).channels[0].status == "kfs-omni-status.local"
+
+
+def test_from_codar_block_centre_key_beats_first_transmitter(tmp_etc, run_cli, codar_kfs_file):
+    codar_kfs_file.write_text(codar_kfs_file.read_text().replace(
+        'channel_name = "codar-4463khz"', 'channel_name = "codar-4463khz"\ncenter_freq_hz = 4463500'))
+    assert run_cli(*INIT, "--instance", "KFS-MAIN", "--reporter-id", "KFS/MAIN",
+                   "--from-codar", str(codar_kfs_file)) == 0
+    assert load_instance("KFS-MAIN", tmp_etc).channels[0].centre_hz == 4_463_500.0

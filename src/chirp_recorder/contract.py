@@ -21,6 +21,8 @@ from chirp_recorder.core.channels import ChannelPlan
 from chirp_recorder.core.daemon import applied_state_path
 from chirp_recorder.version import GIT_INFO
 
+log = logging.getLogger(__name__)
+
 CONTRACT_VERSION = "0.8"
 DEPLOY_TOML = "/opt/git/sigmond/chirp-recorder/deploy.toml"
 LOG_DIR = "/var/log/chirp-recorder"
@@ -63,7 +65,11 @@ def chain_delays(cfg: InstanceConfig, coordination_env: Optional[Path] = None) -
 
 def _read_applied(cfg: InstanceConfig) -> Optional[dict]:
     from hamsci_dsp.timing import read_applied_state
-    return read_applied_state(applied_state_path(cfg.output_dir))
+    try:
+        return read_applied_state(applied_state_path(cfg.output_dir))
+    except Exception as exc:  # noqa: BLE001  a bad file reads as nothing applied
+        log.warning("instance %s: applied-state unreadable: %s", cfg.key, exc)
+        return None
 
 
 def _config_issue(key: str, exc: ConfigError) -> list[dict]:
@@ -161,7 +167,8 @@ def build_validate(keys: list[str], etc: Path = DEFAULT_ETC) -> dict:
         found = _warnings(cfg)
         issues.extend(found)
         per[key] = {"ok": True, "channels": channel_dicts(cfg.channels),
-                    "capacity": capacity_for(cfg)}
+                    "capacity": capacity_for(cfg),
+                    "timing_authority_applied": _read_applied(cfg)}
     if not keys:
         issues.append({"severity": "fail", "instance": "all",
                        "message": f"no instance config in {etc}"})
@@ -174,4 +181,5 @@ def build_validate(keys: list[str], etc: Path = DEFAULT_ETC) -> dict:
         payload["config_path"] = str(Path(etc) / f"{keys[0]}.toml")
         payload["channels"] = per[keys[0]]["channels"]
         payload["capacity"] = per[keys[0]]["capacity"]
+        payload["timing_authority_applied"] = per[keys[0]].get("timing_authority_applied")
     return payload

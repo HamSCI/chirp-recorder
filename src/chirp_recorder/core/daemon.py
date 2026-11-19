@@ -18,6 +18,7 @@ import signal
 import socket
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -32,6 +33,7 @@ from chirp_recorder.core.source import RawChannelSource
 from chirp_recorder.core.timing import (COORDINATION_ENV, Tie, chain_delay_from_env,
                                         radiod_id_for_status)
 from hamsci_dsp import sigmondb_rows as sr
+from hamsci_dsp.timing import APPLIED_STATE_SCHEMA
 from chirp_recorder.physics.stopgap import utc_datetime
 from chirp_recorder.core.writer import PhaseStore, RowWriter, make_sink_writers
 
@@ -86,7 +88,7 @@ class ChannelWorker(threading.Thread):
         self._lock = threading.Lock()
         self.last_interval_at: Optional[float] = None
         self._stats = {"delivered": 0, "failures": 0, "restarts": 0,
-                       "rows": 0, "spots": 0, "delay_basis": None}
+                       "rows": 0, "spots": 0, "delay_basis": None, "t_level": None}
 
     @property
     def stats(self) -> dict:
@@ -200,6 +202,7 @@ class ChannelWorker(threading.Thread):
             self._stats["rows"] += n_rows
             self._stats["spots"] += spots
             self._stats["delay_basis"] = label.delay_basis
+            self._stats["t_level"] = getattr(label, "t_level", None)
         self.last_interval_at = self._clock()
 
 
@@ -398,12 +401,35 @@ class Daemon:
                 "interval_s": self.cfg.interval_s, "measuring_cost": self.measure,
                 "estimated_cost": self._admitted_estimated, "channels": chans}
 
+    def timing_authority_applied(self) -> Optional[dict]:
+        """The CLIENT-CONTRACT section 3 block: populated when every channel that
+        has labelled an interval used a corrected label (T6 or authority),
+        else None (a mixed state reads null, never an average)."""
+        labelled = [w for w in self._workers if w.stats["delay_basis"] is not None]
+        if not labelled or any(w.stats["delay_basis"] not in ("t6", "authority")
+                               for w in labelled):
+            return None
+        bases = sorted({w.stats["delay_basis"] for w in labelled})
+        tiers = sorted({w.stats["t_level"] for w in labelled if w.stats["t_level"]})
+        radiods = sorted({w.plan.status for w in labelled})
+        return {"source": "hf-timestd", "tier": tiers[0] if len(tiers) == 1 else None,
+                "sigma_ns": None, "snapshot_age_s": None,
+                "radiod_id": radiods[0] if len(radiods) == 1 else None,
+                "delay_basis": bases,
+                "channels": {"total": len(self._workers), "anchored": len(labelled),
+                             "applied": len(labelled)}}
+
     def _write_applied_state(self) -> None:
         path = applied_state_path(self.cfg.output_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + ".tmp")
+        now = time.time()    # the host clock only dates the file, for a reader's age test
+        payload = {**self.applied_state(),
+                   "schema": APPLIED_STATE_SCHEMA, "written_epoch": now,
+                   "written_utc": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(),
+                   "timing_authority_applied": self.timing_authority_applied()}
         try:
-            tmp.write_text(json.dumps(self.applied_state(), indent=2, sort_keys=True) + "\n")
+            tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
             os.replace(tmp, path)
         except BaseException:
             tmp.unlink(missing_ok=True)

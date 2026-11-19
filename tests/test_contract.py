@@ -201,3 +201,49 @@ def test_deploy_registers_receiver_channels():
     assert rc["parser_file"] == "src/chirp_recorder/sigmond_tui.py"
     assert rc["parser_attr"] == "parse_receiver_channels" and rc["per_instance"] is True
     assert (ROOT / rc["parser_file"]).is_file()
+
+
+# --- applied-state, end to end (fix round 1) ---------------------------------
+
+def _daemon_with_workers(tmp_etc, bases):
+    from types import SimpleNamespace
+    from chirp_recorder.config import load_instance
+    from chirp_recorder.core.daemon import Daemon
+    cfg = load_instance("AC0G-B4", tmp_etc)
+    d = Daemon(cfg, headroom_reader=lambda: None, costs={}, notify=lambda m: None)
+    d._workers = [SimpleNamespace(
+        plan=p, stats={"delay_basis": b, "t_level": "T6" if b == "t6" else None,
+                       "delivered": 1})
+        for p, b in zip(cfg.channels, bases)]
+    return d
+
+
+def test_daemon_writes_what_validate_reads(tmp_etc, configured, run_cli_out):
+    _point_output(tmp_etc)
+    d = _daemon_with_workers(tmp_etc, ["t6", "t6"])
+    d._write_applied_state()
+    v = json.loads(run_cli_out("validate", "--json", "--instance", "AC0G-B4"))
+    block = v["timing_authority_applied"]
+    assert block["source"] == "hf-timestd" and block["tier"] == "T6"
+    assert block["channels"] == {"total": 2, "anchored": 2, "applied": 2}
+    own = json.loads((tmp_etc.parent / "data" / "applied-state.json").read_text())
+    assert own["instance"] == "AC0G-B4" and own["schema"] == "applied-state/v1"
+
+
+def test_mixed_labels_read_null(tmp_etc, configured, run_cli_out):
+    _point_output(tmp_etc)
+    _daemon_with_workers(tmp_etc, ["t6", "radiod"])._write_applied_state()
+    inv = json.loads(run_cli_out("inventory", "--json", "--instance", "AC0G-B4"))
+    assert inv["instances"][0]["timing_authority_applied"] is None
+
+
+def test_bad_applied_state_gives_null_and_a_warning(tmp_etc, configured, run_cli_full,
+                                                    monkeypatch):
+    import hamsci_dsp.timing as ht
+    _point_output(tmp_etc)
+
+    def boom(*a, **k):
+        raise ValueError("garbled")
+    monkeypatch.setattr(ht, "read_applied_state", boom)
+    rc, out, err = run_cli_full("inventory", "--json", "--instance", "AC0G-B4")
+    assert rc == 0 and json.loads(out)["instances"][0]["timing_authority_applied"] is None

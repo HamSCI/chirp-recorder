@@ -17,6 +17,8 @@ skips the picker so a side-by-side night compares like with like.
 """
 from __future__ import annotations
 
+import grp
+import logging
 import math
 import os
 import shutil
@@ -41,6 +43,8 @@ except ModuleNotFoundError:  # Python 3.10
 COORDINATION_ENV = Path("/etc/sigmond/coordination.env")
 COORDINATION_TOML = Path("/etc/sigmond/coordination.toml")
 DEFAULT_MAX_CHANNELS = 2
+SERVICE_GROUP = "chirprec"
+log = logging.getLogger(__name__)
 _REPO = Path(__file__).resolve().parent.parent.parent
 _WIZARD_PATH = _REPO / "scripts" / "config-wizard.sh"
 CODAR_PHYSICS_KEYS = tuple(k for k in PHYSICS_DEFAULTS if k != "enabled")
@@ -95,14 +99,15 @@ def resolve_position(env, *, codar_station: Optional[dict] = None) -> dict:
     """{'lat','lon','grid','precise':bool,'note':str}.  Raises Refused."""
     grid = (env.get("STATION_GRID") or "").strip()
     cs = codar_station or {}
-    got, where = None, ""
-    if cs:
+    # Sigmond coordination is the live authority (GPSDO or the operator); a
+    # codar-sounder file can be stale, so it comes second.
+    got = coordination_position(env)
+    where = "sigmond coordination"
+    if not got and cs:
         got = _coords(cs.get("receiver_lat"), cs.get("receiver_lon"))
-        where = "the codar-sounder file"
+        where = "the codar-sounder file (no coordinates in sigmond coordination)"
+    if cs:
         grid = grid or str(cs.get("grid_square") or "").strip()
-    if not got:
-        got = coordination_position(env)
-        where = "sigmond coordination"
     if got:
         return {"lat": got[0], "lon": got[1], "grid": grid, "precise": True,
                 "note": f"position: precise, from {where}"}
@@ -245,7 +250,11 @@ def _codar_channels(doc: dict, seed: dict) -> list[dict]:
         txs = [txs] if isinstance(txs, dict) else list(txs)
         ids = [str(t.get("id", "")) for t in txs]
         status = str(b.get("status") or "")
-        centre = next((t["center_freq_hz"] for t in txs if "center_freq_hz" in t), None)
+        centre = b.get("center_freq_hz")      # codar-sounder's schema has no such key today
+        if centre is None:
+            centre = next((t["center_freq_hz"] for t in txs if "center_freq_hz" in t), None)
+            log.info("--from-codar: block %s has no centre of its own; using its first "
+                     "transmitter's center_freq_hz", label)
         if not ids or centre is None or not status:
             raise Refused(f"--from-codar: [[radiod]] block {label} needs a status, "
                           "a transmitter and its center_freq_hz")
@@ -276,6 +285,9 @@ def build_document(args, env) -> tuple[str, str, dict, dict]:
     cap = _max_channels(args, env)
     pos = resolve_position(env, codar_station=(codar or {}).get("station"))
     status = (getattr(args, "radiod_status", None) or env.get("SIGMOND_RADIOD_STATUS", "")).strip()
+    if codar is not None and status:
+        print(f"chirp-recorder: --radiod-status {status} ignored: --from-codar carries "
+              "each block's own radiod", file=sys.stderr)
     if codar is None:
         if not status:
             raise Refused(f"instance {key}: no radiod for this receiver; pass "
@@ -316,13 +328,29 @@ def write_config(etc: Path, key: str, rid: str, doc: dict, source: str) -> Path:
     target = Path(etc) / f"{key}.toml"
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".part")
-    tmp.write_text(text, encoding="utf-8")
     try:
-        tmp.chmod(0o644)
-    except PermissionError:
-        pass
-    tmp.replace(target)
+        tmp.write_text(text, encoding="utf-8")
+        _restrict(tmp)
+        tmp.replace(target)
+    finally:
+        tmp.unlink(missing_ok=True)
     return target
+
+
+def _restrict(path: Path) -> None:
+    """The file can hold a precise position: never world-readable.  0640 with
+    group chirprec (the daemon's group) when that group exists, else 0600."""
+    try:
+        gid = grp.getgrnam(SERVICE_GROUP).gr_gid
+    except KeyError:
+        path.chmod(0o600)
+        return
+    try:
+        os.chown(path, -1, gid)
+    except PermissionError:
+        path.chmod(0o600)
+        return
+    path.chmod(0o640)
 
 
 def cmd_config_init(args, etc: Path = DEFAULT_ETC) -> int:
