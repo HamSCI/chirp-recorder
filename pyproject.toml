@@ -20,6 +20,7 @@ dependencies = [
     # Sink writer (hs_uploader.sink.Writer).  The writer falls back to
     # sigmond.hamsci_sink when this does not import.
     "hs-uploader>=0.1.0",
+    "tomli>=2.0; python_version<'3.11'",
 ]
 
 [project.optional-dependencies]

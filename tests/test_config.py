@@ -135,3 +135,11 @@ def test_tdma_offsets_stay_in_raw(tmp_path):
 def test_missing_file_is_config_error(tmp_path):
     with pytest.raises(ConfigError):
         load_instance("AC0G-T7", tmp_path)
+
+
+def test_non_table_sections_join_the_problem_list(tmp_path):
+    (tmp_path / "AC0G-T7.toml").write_text(
+        'station = 3\nchannel = [1]\n[instance]\nreporter_id = "AC0G/T7"\n')
+    with pytest.raises(ConfigError) as e:
+        load_instance("AC0G-T7", tmp_path)
+    assert "[station] must be a table" in str(e.value) and "must be a table" in str(e.value).split("[station]")[1]

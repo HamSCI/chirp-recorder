@@ -114,6 +114,9 @@ def load_instance(key: str, etc: Path = DEFAULT_ETC,
 
     # position
     st = raw.get("station") or {}
+    if not isinstance(st, dict):
+        errs.append("[station] must be a table")
+        st = {}
     grid = st.get("grid_square", "")
     if not isinstance(grid, str):
         errs.append("[station] grid_square must be a string")
@@ -166,7 +169,13 @@ def load_instance(key: str, etc: Path = DEFAULT_ETC,
     blocks = raw.get("channel") or []
     if not blocks:
         errs.append("no [[channel]] block")
+    if not isinstance(blocks, list):
+        errs.append("[[channel]] must be an array of tables")
+        blocks = []
     for i, blk in enumerate(blocks):
+        if not isinstance(blk, dict):
+            errs.append(f"[[channel]] #{i + 1}: must be a table")
+            continue
         name = blk.get("name")
         if not isinstance(name, str) or not name:
             errs.append(f"[[channel]] #{i + 1}: name is missing")
