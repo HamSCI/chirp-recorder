@@ -19,7 +19,7 @@ contract    = "0.8"
 start_priority = 200
 
 # Configuration interview (CONTRACT v0.5 section 14): sigmond calls these
-# subcommands.  They arrive in a later task.
+# subcommands.
 [contract.config]
 init = ["/usr/local/bin/chirp-recorder", "config", "init"]
 edit = ["/usr/local/bin/chirp-recorder", "config", "edit"]
@@ -154,3 +154,9 @@ verb         = "chirp"
 description  = "CODAR chirp arrivals per receiver"
 verbose      = true
 per_instance = true
+
+[client_features.receiver_channels]
+description  = "CODAR chirp IQ channels (one per [[channel]])"
+per_instance = true
+parser_file  = "src/chirp_recorder/sigmond_tui.py"
+parser_attr  = "parse_receiver_channels"
