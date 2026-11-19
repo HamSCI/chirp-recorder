@@ -26,6 +26,9 @@ MARGIN_DB = 3.0
 HALF_BAND_MAX_DB = 6.0
 FLOOR_DB = 10.0
 MAX_COMPONENTS = 12
+OVERLAP_CELLS = 2.0     # an overlap lies within this many resolution cells ...
+RESIDUE_DB = 12.0       # an "m" residue this far under an arrival is CLEAN's own leftover
+OVERLAP_MAX_RUNG = 6    # ... of another component, or of this rung of a stronger one
 
 
 @dataclass(frozen=True)
@@ -41,6 +44,13 @@ class Arrival:
     carrier_phase_rad: Optional[float]
     s4: Optional[float]
     sigma_phi_rad: Optional[float]
+    # --- added after review (fix round 1); defaults keep older callers valid ---
+    overlap_flag: bool = False
+    tau_uncorrected_ns: Optional[int] = None    # None reads as "equal to tau_ns"
+
+    def __post_init__(self):
+        if self.tau_uncorrected_ns is None:
+            object.__setattr__(self, "tau_uncorrected_ns", self.tau_ns)
 
 
 @dataclass(frozen=True)
@@ -52,6 +62,7 @@ class GroupResult:
     gate: Optional[GateFit]
     arrivals: list
     rejected: dict
+    overlap_flagged: int = 0     # kept arrivals whose delay sigma understates the error
 
 
 def _slow_time(sweeps: np.ndarray, wf, fs: float, tau_s: float) -> np.ndarray:
@@ -75,11 +86,64 @@ def _doppler(v: np.ndarray, period_s: float):
     if m < 2:
         return None, None, None
     ph = np.unwrap(np.angle(v))
-    rate = float(np.mean(np.diff(ph)) / period_s)
     t = np.arange(m) * period_s
+    # Least-squares slope over every sweep, not first minus last.  Slow-time
+    # sampling aliases |doppler| above 1 / (2 * period).
+    rate = float(np.polyfit(t, ph, 1)[0])
     t_mid = m * period_s / 2
     z = np.sum(v * np.exp(-1j * rate * (t - t_mid)))
     return rate, rate / (2 * np.pi), float(np.angle(z))
+
+
+def _doppler_free_tau(sweeps, wf, fs, tau_raw_s, dop_hz):
+    """Delay of one arrival with its Doppler removed.
+
+    Range-Doppler coupling: a Doppler shift f turns k*(t - tau) into
+    k*(t - (tau - f/k)), so the matched filter peaks at tau - f/k, k the
+    waveform's signed rate (the sign flips with sweep direction).  CLEAN's
+    template assumes f = 0, and 0.2 Hz over a 1 s sweep distorts the response
+    enough that CLEAN, then +f/k, leaves about 1.4 us.  So derotate the
+    interval by the measured Doppler, compress again, and read the peak
+    near tau_raw + f/k, refined by a parabola in log power as CLEAN does.
+    """
+    m, n = sweeps.shape
+    rot = np.exp(-2j * np.pi * dop_hz * np.arange(m * n) / fs).reshape(m, n)
+    p = matched_profile(sweeps * rot, wf, fs)
+    i0 = int(round((tau_raw_s + dop_hz / wf.rate_hz_per_s) * fs))
+    idx = np.arange(i0 - 2, i0 + 3) % n
+    i = int(idx[int(np.argmax(p[idx]))])
+    a, b, c = np.log(p[(i - 1) % n]), np.log(p[i]), np.log(p[(i + 1) % n])
+    den = a - 2 * b + c
+    frac = i + (0.5 * (a - c) / den if den < 0 else 0.0)
+    return (frac / fs) % wf.period_s
+
+
+def _overlaps(c, comps, wf) -> bool:
+    """True when another component lies within OVERLAP_CELLS resolution cells.
+
+    The cell is 1 / B, B = wf.bandwidth_hz().  Also true when a ladder rung
+    (m = 1..OVERLAP_MAX_RUNG, either side) of a stronger component lies
+    within that distance: a coherent neighbour pulls the CLEAN peak, and
+    delay_sigma_ns (one isolated arrival) does not cover that.
+    """
+    P = wf.period_s
+    cell = OVERLAP_CELLS / wf.bandwidth_hz()
+    L = (1.0 / (abs(wf.rate_hz_per_s) * wf.gate_period_s)
+         if wf.gate_period_s else None)
+
+    def dist(a, b):
+        return abs(((a - b + P / 2) % P) - P / 2)
+
+    for o in comps:
+        if o is c:
+            continue
+        if dist(c.tau_s, o.tau_s) < cell and (o.tag != "m" or o.level_db > c.level_db - RESIDUE_DB):
+            return True
+        if L is not None and o.level_db > c.level_db:
+            for m in range(1, OVERLAP_MAX_RUNG + 1):
+                if min(dist(c.tau_s, o.tau_s + m * L), dist(c.tau_s, o.tau_s - m * L)) < cell:
+                    return True
+    return False
 
 
 def detect_group(samples: np.ndarray, *, fs: int, channel_centre_hz: float,
@@ -130,10 +194,18 @@ def detect_group(samples: np.ndarray, *, fs: int, channel_centre_hz: float,
         sc = compute_scintillation(v, sample_rate_hz=1.0 / wf.period_s,
                                    convention=HF_OBLIQUE)
         known = sc.confidence > 0
+        tau_raw_ns = int(round(c.tau_s * 1e9))
+        tau_ns = tau_raw_ns
+        if dop is not None:
+            # Range-Doppler coupling, corrected (see _doppler_free_tau).  With
+            # no Doppler estimate, no correction.
+            tau_ns = int(round(_doppler_free_tau(sweeps, wf, fs, c.tau_s, dop) * 1e9))
         arrivals.append(Arrival(
-            tau_ns=int(round(c.tau_s * 1e9)), delay_sigma_ns=float(sigma),
+            tau_ns=tau_ns, tau_uncorrected_ns=tau_raw_ns,
+            overlap_flag=_overlaps(c, comps, wf), delay_sigma_ns=float(sigma),
             level_db=float(c.level_db), margin_db=float(margin), half_band_db=float(hb),
             clean_tag=c.tag, doppler_hz=dop, phase_rate=rate, carrier_phase_rad=cph,
             s4=float(sc.s4_index) if known else None,
             sigma_phi_rad=float(sc.sigma_phi_rad) if known else None))
-    return GroupResult(group, m, null_max, null_med, gate, arrivals, rejected)
+    return GroupResult(group, m, null_max, null_med, gate, arrivals, rejected,
+                       sum(a.overlap_flag for a in arrivals))
