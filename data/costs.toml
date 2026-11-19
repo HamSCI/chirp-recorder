@@ -1,0 +1,8 @@
+# Measured per-channel cost of chirp-recorder, by code version and sample rate.
+# Task 23 fills the rows; until then no version has a measured cost.
+#
+# [versions."0.1.0".rates."64000"]
+# cores = 0.0          # CPU cores one channel uses at this rate
+# mem_mib = 0          # resident memory one channel uses, in MiB
+# measured_on = ""     # station that took the measurement
+# measured_at = ""     # UTC date of the measurement
