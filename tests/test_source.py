@@ -342,6 +342,16 @@ def test_kastream_empty_payload_condemns_nothing():
     assert calls == [("pkt", 1_000, 640)]
 
 
+def test_kastream_stream_interruption_condemns_nothing():
+    # ka9q-python reports a jump too long to fill as STREAM_INTERRUPTION,
+    # duration 0, and starts a new batch after it: no zeros to find.
+    calls = []
+    ka = _ka(calls)
+    ka._on_samples(_batch(640),
+                   _q(1_000, 0, [_gap(GapSource.STREAM_INTERRUPTION, 640, 0)]))
+    assert calls == [("pkt", 1_000, 640)]
+
+
 def test_kastream_missing_rtp_start_is_loud_and_never_synthesised(caplog):
     caplog.set_level(logging.ERROR)
     calls = []

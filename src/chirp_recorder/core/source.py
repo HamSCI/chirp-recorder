@@ -101,7 +101,8 @@ def _poll_from_reply(reply, output_samprate: int) -> Optional[CounterPoll]:
 
 
 
-_NO_SAMPLES = {"empty_payload", "stream_start"}      # gap reports that insert no zeros
+_NO_SAMPLES = {"empty_payload", "stream_start",   # gap reports that insert no zeros
+               "stream_interruption"}
 
 
 class _KaStream:
@@ -119,7 +120,7 @@ class _KaStream:
     Where the batch's own report and the batch disagree (a reported gap with no
     zero run, or a different count of runs), the whole batch goes to on_lost.
     A zero run the stream never reported is a gap all the same.  Reports that
-    insert no samples (EMPTY_PAYLOAD) condemn nothing.  A batch without
+    insert no samples (EMPTY_PAYLOAD, STREAM_INTERRUPTION) condemn nothing.  A batch without
     `delivered_rtp_start` is never given an RTP from a running count (that
     disables the continuity check, the bug codar-sounder 344457b fixed): it is
     logged as an ERROR and passed to on_lost when its place is known.
