@@ -269,3 +269,25 @@ def test_a_configured_offset_reads_the_path_whatever_the_cpi_phase(
         spots += stop.feed(iv, lab).spots
     assert spots, "no physics row: the replica missed the transmitter"
     assert spots[0]["group_range_km"] == pytest.approx(420.0, abs=15.0)
+
+
+def test_a_sweep_shorter_than_its_period_runs_no_physics(
+        tmp_path, caplog, physics_settings, split_into_intervals):
+    """hamsci_dsp's chirp model, and so the rows and this replica, put the
+    centre crossing at P/2 whatever the sweep length.  For a sweep shorter
+    than its period that misplaces the sweep start, so the stopgap refuses
+    physics for that transmitter, with one warning, rather than guess."""
+    import dataclasses
+
+    from conftest import phys_cpi
+    plan, txs = _plan(-25_733.913)
+    short = dataclasses.replace(txs["TX1"], sweep_bw_hz=12_867.0)    # a 0.5 s sweep
+    assert short.waveform().sweep_s is not None
+    x, start = phys_cpi()
+    with caplog.at_level(logging.WARNING):
+        stop = _stop((plan, {"TX1": short}), physics_settings, tmp_path)
+        outs = [stop.feed(iv, lab) for iv, lab in split_into_intervals(x, start)]
+    w = _warns(caplog)
+    assert len(w) == 1 and "TX1" in w[0] and "shorter than its period" in w[0]
+    assert all(o == PhysicsOut([], []) for o in outs)
+    assert not list(tmp_path.rglob("*.jsonl"))

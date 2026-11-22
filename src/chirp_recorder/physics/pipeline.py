@@ -90,10 +90,6 @@ class TransmitterPipeline:
         # channel rate (the convention in dechirp.make_replica); process_cpi
         # turns it into this CPI's buffer offset.
         self.tdma_offset_samples = int(tx_config.get("tdma_offset_samples", 0))
-        # Sweep length (s); tx_config's sweep_s is None for a full-period
-        # sweep.  The sweep crosses the channel centre (the replica's zero)
-        # half a sweep after it starts.
-        self.sweep_s = float(tx_config.get("sweep_s") or 1.0 / self.sweep_repetition_hz)
         self.ground_distance_km = great_circle_km(
             receiver_lat, receiver_lon,
             float(tx_config["tx_lat_deg"]), float(tx_config["tx_lon_deg"]),

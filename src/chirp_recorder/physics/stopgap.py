@@ -86,12 +86,20 @@ class PhysicsStopgap:
         for g in plan.groups:
             for tx_id in g.tx_ids:
                 tx = txs[tx_id]
+                if tx.waveform().sweep_s is not None:
+                    # hamsci_dsp's chirp, the rows and this replica all put the
+                    # centre crossing at P/2; a shorter sweep's start would be
+                    # misplaced, so no physics rather than a guess.
+                    log.warning(
+                        "physics off for %s on %s: its sweep (%.3f s) is shorter than "
+                        "its period (%.3f s), which the replica does not model",
+                        tx.id, plan.name, tx.waveform().sweep_s, tx.period_s)
+                    continue
                 cfg = {"id": tx.id, "center_freq_hz": int(round(tx.centre_hz)),
                        "sweep_rate_hz_per_s": tx.rate_hz_per_s,
                        "sweep_bw_hz": tx.sweep_bw_hz,
                        "sweep_repetition_hz": 1.0 / tx.period_s,
                        "tx_lat_deg": tx.lat, "tx_lon_deg": tx.lon,
-                       "sweep_s": tx.waveform().sweep_s,
                        # sweep-start phase after the UTC second (dechirp.make_replica)
                        "tdma_offset_samples": int(offsets.get(tx.id, 0))}
                 pipe = TransmitterPipeline(
