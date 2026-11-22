@@ -225,8 +225,13 @@ def test_parity_on_a_golden_capture(tmp_path, tx_block, ref_kw, plan_and_txs,
                                output_dir=tmp_path / "ref", ch_writer=None, sigmondb_hook=None,
                                **dict(ref_kw, coherent_seconds=30.0))
     ref.process_cpi(x, start)
+    # codar-sounder's replica crosses the channel centre at -offset.
+    # chirp-recorder's offset is the sweep start after the UTC second, half a
+    # sweep before the crossing; the capture opens on the second, so the same
+    # replica is (-offset - N/2) mod N here.
     stop = _stop(plan_and_txs, dict(physics_settings, coherent_seconds=30,
-                                    tdma_offset_samples={"TX1": tdma}), tmp_path / "new")
+                                    tdma_offset_samples={"TX1": (-tdma - 32_000) % 64_000}),
+                 tmp_path / "new")
     for iv, lab in split_into_intervals(x, start):
         stop.feed(iv, lab)
     a, b = _records(tmp_path / "ref"), _records(tmp_path / "new")
@@ -234,3 +239,43 @@ def test_parity_on_a_golden_capture(tmp_path, tx_block, ref_kw, plan_and_txs,
     drop = {"client"}
     assert [{k: v for k, v in r.items() if k not in drop} for r in a] == \
            [{k: v for k, v in r.items() if k not in drop} for r in b]
+
+
+# --- the TDMA offset names the transmitter's sweep start after the UTC second --
+
+def _tx_at(rate, tx_utc_s, group_range_km, start_ns, seconds=60, fs=64_000):
+    """IQ of one TX whose sweep starts tx_utc_s after the UTC second (at the
+    band edge; it crosses the centre half a sweep later, hamsci_dsp's model),
+    heard over a group_range_km path, in a CPI whose first sample is at start_ns."""
+    import numpy as np
+    b = (start_ns % 10**9) / 1e9
+    u = (b + np.arange(seconds * fs) / fs - tx_utc_s - group_range_km / 299_792.458) % 1.0
+    return np.exp(1j * np.pi * rate * (u - 0.5) ** 2).astype(np.complex64)
+
+
+@pytest.mark.parametrize("rate", [-25_733.913, 25_733.913])
+@pytest.mark.parametrize("cpi_phase_s", [0.25, 0.6])
+@pytest.mark.parametrize("tx_s", [0.2, 0.7])
+def test_a_configured_offset_reads_the_path_whatever_the_cpi_phase(
+        tmp_path, physics_settings, split_into_intervals, rate, cpi_phase_s, tx_s):
+    """A transmitter configured at tx_s reads its true group range whether
+    the CPI opens 0.25 s or 0.6 s after the second (two daemon runs)."""
+    import datetime as dt
+
+    from chirp_recorder.core.catalogue import Transmitter
+    from chirp_recorder.core.channels import ChannelPlan, groups_for
+    from conftest import PHYS_TX
+    tx = Transmitter(id="TX1", kind="codar", centre_hz=4_463_000.0, rate_hz_per_s=rate,
+                     period_s=1.0, sweep_bw_hz=25_734.0, lat=PHYS_TX[0], lon=PHYS_TX[1])
+    plan = ChannelPlan("4.4630MHz", "radiod.local", 4_463_000.0, 64_000, groups_for([tx]))
+    start_ns = 1_800_000_000 * 10**9 + int(round(cpi_phase_s * 1e9))
+    start = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc) + dt.timedelta(
+        microseconds=start_ns // 1000)
+    x = _tx_at(rate, tx_s, 420.0, start_ns)
+    stop = _stop((plan, {"TX1": tx}), dict(
+        physics_settings, tdma_offset_samples={"TX1": int(round(tx_s * 64_000))}), tmp_path)
+    spots = []
+    for iv, lab in split_into_intervals(x, start):
+        spots += stop.feed(iv, lab).spots
+    assert spots, "no physics row: the replica missed the transmitter"
+    assert spots[0]["group_range_km"] == pytest.approx(420.0, abs=15.0)

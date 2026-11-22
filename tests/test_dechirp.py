@@ -672,3 +672,54 @@ class TestPerSweepMADRejection:
         for i in range(n_sweeps):
             if result.bad_sweep_mask[i]:
                 assert np.all(result.range_spectrum[i] == 0)
+
+
+# ---------------------------------------------------------------------------
+# The offset convention: the replica starts where the transmitter's sweep does
+# ---------------------------------------------------------------------------
+
+def _beat_ms(result) -> float:
+    """Delay (ms) of the strongest bin of the whole range axis, either sign."""
+    i = int(np.argmax(np.abs(result.range_doppler).sum(axis=0)))
+    return float(result.range_axis_km[i]) / C_KM_PER_S * 1e3
+
+
+class TestOffsetConvention:
+    """``phase_offset_samples = s`` puts the replica's centre crossing (this
+    model's sweep zero, as in _synth_chirp) at buffer sample +s.  A signal
+    whose zero sits there, 2 ms away, reads 2 ms.  Offsets 0 and P/2 cannot
+    tell the two signs apart; 0.2 s and 0.7 s can."""
+
+    @pytest.mark.parametrize("rate", [SWEEP_RATE_HZ_PER_S, -SWEEP_RATE_HZ_PER_S])
+    @pytest.mark.parametrize("tx_s", [0.0, 0.2, 0.5, 0.7])
+    def test_replica_at_the_sweep_start_reads_the_path(self, rate, tx_s):
+        rx = _synth_chirp(8 * N_SAMPLES, [2e-3], [1.0], sweep_rate_hz_per_s=rate,
+                          target_tdma_offsets_s=[tx_s], noise_db=-80.0)
+        result = dechirp(rx, sample_rate_hz=SAMPLE_RATE_HZ, sweep_rate_hz_per_s=rate,
+                         sweep_repetition_hz=SRF_HZ,
+                         phase_offset_samples=int(round(tx_s * SAMPLE_RATE_HZ)))
+        assert _beat_ms(result) == pytest.approx(2.0, abs=0.1)
+
+    def test_a_fractional_offset_is_honoured(self):
+        """A half-sample start reads the same path as the whole-sample one."""
+        tx_s = 0.2 + 0.5 / SAMPLE_RATE_HZ
+        rx = _synth_chirp(8 * N_SAMPLES, [2e-3], [1.0], target_tdma_offsets_s=[tx_s],
+                          noise_db=-80.0)
+        result = dechirp(rx, sample_rate_hz=SAMPLE_RATE_HZ,
+                         sweep_rate_hz_per_s=SWEEP_RATE_HZ_PER_S, sweep_repetition_hz=SRF_HZ,
+                         phase_offset_samples=tx_s * SAMPLE_RATE_HZ)
+        assert _beat_ms(result) == pytest.approx(2.0, abs=0.1)
+
+
+class TestUpChirp:
+    """An up-chirp (13 seed transmitters) lands on positive group range too."""
+
+    @pytest.mark.parametrize("target_range_km", [500.0, 1000.0])
+    def test_up_chirp_recovers_known_range(self, target_range_km):
+        rate = -SWEEP_RATE_HZ_PER_S
+        rx = _synth_chirp(8 * N_SAMPLES, [target_range_km / C_KM_PER_S], [1.0],
+                          sweep_rate_hz_per_s=rate)
+        result = dechirp(rx, sample_rate_hz=SAMPLE_RATE_HZ, sweep_rate_hz_per_s=rate,
+                         sweep_repetition_hz=SRF_HZ)
+        ranges, prof = positive_range_window(result, range_profile(result))
+        assert abs(float(ranges[int(np.argmax(prof))]) - target_range_km) < 25.0

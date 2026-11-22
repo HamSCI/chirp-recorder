@@ -262,3 +262,54 @@ class TestMatchPeaksToTXs:
             sample_rate_hz=SAMPLE_RATE_HZ, n_per_sweep=N_SAMPLES,
         )
         assert out == {"LISL": None}
+
+
+# ---------------------------------------------------------------------------
+# discover -> offset_for_tx -> dechirp reads the path (the sign), and an
+# offset names the transmitter's phase after the UTC second (the reference)
+# ---------------------------------------------------------------------------
+
+def _one_tx(rate, tx_utc_s, delay_s, buffer_utc_s, n_periods=6):
+    """Continuous IQ of one TX whose sweep starts tx_utc_s after the UTC
+    second, received delay_s later, in a buffer opening buffer_utc_s after it.
+    The sweep starts at the band edge and crosses the centre half a sweep
+    later (hamsci_dsp's chirp model, the sweep start the rows count from)."""
+    t = buffer_utc_s + np.arange(n_periods * N_SAMPLES) / SAMPLE_RATE_HZ
+    u = (t - tx_utc_s - delay_s) % (1.0 / SRF_HZ)
+    return np.exp(1j * np.pi * rate * (u - 0.5 / SRF_HZ) ** 2).astype(np.complex64)
+
+
+class TestOffsetChain:
+    D_KM = 2e-3 * C_KM_PER_S          # a 2 ms direct path
+
+    @pytest.mark.parametrize("rate", [SWEEP_RATE_HZ_PER_S, -SWEEP_RATE_HZ_PER_S])
+    @pytest.mark.parametrize("tx_s", [0.0, 0.2, 0.5, 0.7])
+    def test_discovered_offset_dechirps_to_the_path(self, rate, tx_s):
+        from chirp_recorder.physics.dechirp import dechirp, positive_range_window, range_profile
+        rx = _one_tx(rate, tx_s, 2e-3, 0.0)
+        pk = discover_tx_offsets(rx, sample_rate_hz=SAMPLE_RATE_HZ, sweep_rate_hz_per_s=rate,
+                                 sweep_repetition_hz=SRF_HZ)[0].offset_samples
+        off = offset_for_tx(pk, ground_distance_km=self.D_KM, sample_rate_hz=SAMPLE_RATE_HZ,
+                            n_per_sweep=N_SAMPLES)
+        # Without a UTC label the offset is the buffer sample where the TX's
+        # sweep crosses the centre, half a sweep after it starts.
+        assert off == int(round((tx_s + 0.5) % 1.0 * SAMPLE_RATE_HZ))
+        r = dechirp(rx, sample_rate_hz=SAMPLE_RATE_HZ, sweep_rate_hz_per_s=rate,
+                    sweep_repetition_hz=SRF_HZ, phase_offset_samples=off)
+        ranges, prof = positive_range_window(r, range_profile(r))
+        window = (ranges > 300.0) & (ranges < 900.0)        # the physics range window
+        got = float(ranges[window][int(np.argmax(prof[window]))])
+        assert got == pytest.approx(self.D_KM, abs=25.0)
+
+    @pytest.mark.parametrize("buffer_s", [0.25, 0.6])
+    def test_offset_names_the_phase_after_the_utc_second(self, buffer_s):
+        """The same TX scanned from buffers that open at two different phases
+        of the second (two runs) yields one offset: 0.2 s after the second."""
+        rx = _one_tx(SWEEP_RATE_HZ_PER_S, 0.2, 2e-3, buffer_s)
+        pk = discover_tx_offsets(rx, sample_rate_hz=SAMPLE_RATE_HZ,
+                                 sweep_rate_hz_per_s=SWEEP_RATE_HZ_PER_S,
+                                 sweep_repetition_hz=SRF_HZ)[0].offset_samples
+        start_ns = 1_800_000_000 * 10**9 + int(round(buffer_s * 1e9))
+        off = offset_for_tx(pk, ground_distance_km=self.D_KM, sample_rate_hz=SAMPLE_RATE_HZ,
+                            n_per_sweep=N_SAMPLES, buffer_start_utc_ns=start_ns)
+        assert off == 12_800

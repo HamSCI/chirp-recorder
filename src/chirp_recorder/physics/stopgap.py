@@ -91,6 +91,8 @@ class PhysicsStopgap:
                        "sweep_bw_hz": tx.sweep_bw_hz,
                        "sweep_repetition_hz": 1.0 / tx.period_s,
                        "tx_lat_deg": tx.lat, "tx_lon_deg": tx.lon,
+                       "sweep_s": tx.waveform().sweep_s,
+                       # sweep-start phase after the UTC second (dechirp.make_replica)
                        "tdma_offset_samples": int(offsets.get(tx.id, 0))}
                 pipe = TransmitterPipeline(
                     receiver_lat=lat, receiver_lon=lon, radiod_id=radiod,
@@ -143,11 +145,12 @@ class PhysicsStopgap:
         if len(self._ivs) < self._need:
             return PhysicsOut()
         samples = np.concatenate([i.samples for i in self._ivs])
-        start = utc_datetime(self._first_label.utc_ns)
+        start_ns = int(self._first_label.utc_ns)
         self._ivs, self._first_label = [], None
-        return self._process(samples, start)
+        return self._process(samples, start_ns)
 
-    def _process(self, samples: np.ndarray, start: datetime) -> PhysicsOut:
+    def _process(self, samples: np.ndarray, start_ns: int) -> PhysicsOut:
+        start = utc_datetime(start_ns)
         paths: list[Path] = []
         spots: list[dict] = []
         failures: list[str] = []
@@ -158,7 +161,7 @@ class PhysicsStopgap:
                 x = samples
                 if shift_hz:
                     x = (samples * np.exp(-2j * np.pi * shift_hz * n / fs)).astype(np.complex64)
-                path, rows = pipe.process_cpi(x, start)
+                path, rows = pipe.process_cpi(x, start, cpi_start_ns=start_ns)
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"{pipe.station_id}: {exc}")
                 continue

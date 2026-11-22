@@ -97,7 +97,7 @@ def make_replica(
     sweep_rate_hz_per_s: float,
     *,
     window: bool = True,
-    phase_offset_samples: int = 0,
+    phase_offset_samples: float = 0,
 ) -> np.ndarray:
     """Generate one FMCW chirp replica at complex baseband.
 
@@ -116,34 +116,51 @@ def make_replica(
         sweep_rate_hz_per_s: signed sweep rate (Hz/s).  Sign matters: a
             CODAR down-chirp has ``κ < 0``; up-chirps have ``κ > 0``.
         window: apply a Hann window to suppress FFT sidelobes.
-        phase_offset_samples: TDMA sweep-start phase, in samples within
-            one sweep period.  When two CODAR transmitters share a band
-            via TDMA, each starts its sweep at a different phase within
-            the 1 s period; pass that phase here to build a replica that
-            matches a specific transmitter.  The phase wraps modulo
-            ``n_samples``: passing ``n_samples//4`` builds a replica that
-            had been sweeping for a quarter-period when our window opens,
-            so its instantaneous frequency at t=0 is ``κ · n_samples/4 /
-            sample_rate_hz`` rather than 0.  Default 0 = standard
-            zero-offset replica (compatible with v0.2 callers).
+        phase_offset_samples: the buffer sample at which the replica
+            crosses the channel centre (baseband 0 Hz, where this model's
+            sweep begins).  The crossing sits at sample
+            ``+phase_offset_samples`` (modulo ``n_samples``), so a signal
+            that crosses the centre at that sample dechirps to its path
+            delay.  It may be fractional.  Default 0.
+
+    The offset convention, one for the whole physics path: a configured
+    ``tdma_offset_samples`` is the transmitter's sweep-start phase after
+    the UTC second, in samples at the channel rate, and the replica starts
+    there.  A CODAR sweep starts at one band edge and crosses the centre
+    half a sweep later, so ``TransmitterPipeline`` passes this function the
+    configured phase plus half a sweep, less the CPI's own phase after the
+    second (:func:`utc_phase_samples`).  The sweep start is the one the
+    sigmondb rows count from (hamsci_dsp's chirp model).  codar-sounder's
+    ``make_replica`` put the crossing at ``-offset`` instead; the two agree
+    only at 0 and ``n_samples/2``.
     """
     if n_samples <= 0:
         raise ValueError(f"n_samples must be > 0; got {n_samples}")
     if sample_rate_hz <= 0:
         raise ValueError(f"sample_rate_hz must be > 0; got {sample_rate_hz}")
 
-    # Compute the time axis modulo one sweep period so the replica
-    # wraps continuously: a TX whose sweep started ``phase_offset_samples``
-    # samples ago is, at our t=0, ``phase_offset_samples / sample_rate_hz``
-    # seconds into its sweep.  When that elapsed time crosses one full
-    # period, the sweep restarts → the modulo handles the wrap cleanly.
-    offset = int(phase_offset_samples) % n_samples
-    t_into_sweep = ((np.arange(n_samples) + offset) % n_samples) / sample_rate_hz
+    # Time since the centre crossing, modulo one period so the replica
+    # wraps continuously: the crossing sits at sample +phase_offset_samples,
+    # so sample n is (n - offset) mod N samples past it.
+    offset = float(phase_offset_samples) % n_samples
+    t_into_sweep = ((np.arange(n_samples) - offset) % n_samples) / sample_rate_hz
     phase = 2.0 * np.pi * 0.5 * sweep_rate_hz_per_s * t_into_sweep * t_into_sweep
     replica = np.exp(1j * phase)
     if window:
         replica = replica * np.hanning(n_samples)
     return replica.astype(np.complex64)
+
+
+def utc_phase_samples(utc_ns: int, sample_rate_hz: float, n_per_sweep: int) -> float:
+    """Where ``utc_ns`` falls within the sweep period, in samples.
+
+    The period is counted from the UTC epoch, so for a 1 s period this is
+    the phase after the UTC second (the reference sigmondb rows use too).
+    Integer nanoseconds keep the large epoch term exact."""
+    period_ns = n_per_sweep * 10**9 / sample_rate_hz
+    if period_ns.is_integer():
+        return (int(utc_ns) % int(period_ns)) * sample_rate_hz / 1e9
+    return (int(utc_ns) / 1e9 * sample_rate_hz) % n_per_sweep
 
 
 def dechirp(
@@ -153,7 +170,7 @@ def dechirp(
     sweep_rate_hz_per_s: float,
     sweep_repetition_hz: float,
     apply_window: bool = True,
-    phase_offset_samples: int = 0,
+    phase_offset_samples: float = 0,
 ) -> DechirpResult:
     """Dechirp a CPI of received IQ samples and return the range-Doppler matrix.
 
@@ -173,9 +190,9 @@ def dechirp(
             unambiguous bandwidth.
         apply_window: pass a Hann window through to the replica
             generator.
-        phase_offset_samples: TDMA sweep-start phase for this TX (see
-            ``make_replica``).  Selects which TX in a shared band to
-            dechirp.  Default 0 = zero-offset replica (v0.2 behaviour).
+        phase_offset_samples: the buffer sample where this TX's sweep
+            crosses the channel centre (see ``make_replica``).  Selects
+            which TX in a shared band to dechirp.  Default 0.
     """
     if rx_samples.dtype.kind != "c":
         raise ValueError(
@@ -257,13 +274,12 @@ def dechirp(
     # contribute to range_doppler (which range_profile sums across).
     range_doppler = np.fft.fftshift(np.fft.fft(range_spectrum, axis=0), axes=0)
 
-    # Convert FFT bin → group range.  beat_freq = κ · τ → τ = beat_freq / κ.
-    # For a CODAR down-chirp (κ < 0), positive delays produce negative
-    # beat frequencies, so we use abs(κ) and take abs() of the bin
-    # frequency to land on positive group range regardless of sweep
-    # direction.
+    # Convert FFT bin → group range.  rx · conj(replica) leaves a tone at
+    # beat_freq = -κ · τ, so τ = -beat_freq / κ.  A down-chirp (κ < 0) puts
+    # positive delays at positive beat frequencies, an up-chirp (κ > 0) at
+    # negative ones; the signed κ lands both on positive group range.
     bin_freqs_hz = np.fft.fftfreq(n_samples, d=1.0 / sample_rate_hz)
-    delays_s = bin_freqs_hz / abs(sweep_rate_hz_per_s)
+    delays_s = -bin_freqs_hz / sweep_rate_hz_per_s
     range_axis_km = C_KM_PER_S * delays_s
 
     doppler_axis_hz = np.fft.fftshift(

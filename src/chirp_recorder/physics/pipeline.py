@@ -1,6 +1,6 @@
 """One transmitter's dechirp -> trace -> invert -> write pipeline.
 
-Moved from codar-sounder's core/daemon.py (`_TransmitterPipeline`), unchanged
+Moved from codar-sounder's core/daemon.py (`_TransmitterPipeline`), otherwise unchanged
 in behaviour.  Three differences, all about plumbing:
   - no sink writer and no sigmondb hook (the stopgap owns no sink; the rows
     come back to the caller, pre-flight C12);
@@ -8,11 +8,16 @@ in behaviour.  Three differences, all about plumbing:
     log one warning per CPI;
   - JSONL lands under <output_dir>/physics/<tx>/YYYY/MM/DD.jsonl, and the
     record's "client" names chirp-recorder.
+Two differences in behaviour (2026-11-22): tdma_offset_samples names the
+transmitter's sweep start after the UTC second, and process_cpi places the
+replica from the CPI's own UTC label.  codar-sounder aimed the replica at
+-offset from an unreferenced buffer start (see dechirp.make_replica).  And
+the range axis takes the sweep rate's sign, so an up-chirp reads positive range.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -24,6 +29,7 @@ from chirp_recorder.physics.dechirp import (
     positive_range_window,
     positive_to_raw_index_map,
     range_profile,
+    utc_phase_samples,
 )
 from chirp_recorder.physics.invert import group_range_resolution_km, invert
 from chirp_recorder.physics.output import JsonlWriter
@@ -35,6 +41,8 @@ from chirp_recorder.physics.trace import (
 )
 
 log = logging.getLogger(__name__)
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 class PhysicsJsonlWriter(JsonlWriter):
@@ -78,8 +86,14 @@ class TransmitterPipeline:
         self.sweep_rate_hz_per_s = float(tx_config["sweep_rate_hz_per_s"])
         self.sweep_bw_hz = float(tx_config["sweep_bw_hz"])
         self.sweep_repetition_hz = float(tx_config["sweep_repetition_hz"])
-        # TDMA sweep-start phase, in samples within one period (core/tdma.py).
+        # The TX's sweep-start phase after the UTC second, in samples at the
+        # channel rate (the convention in dechirp.make_replica); process_cpi
+        # turns it into this CPI's buffer offset.
         self.tdma_offset_samples = int(tx_config.get("tdma_offset_samples", 0))
+        # Sweep length (s); tx_config's sweep_s is None for a full-period
+        # sweep.  The sweep crosses the channel centre (the replica's zero)
+        # half a sweep after it starts.
+        self.sweep_s = float(tx_config.get("sweep_s") or 1.0 / self.sweep_repetition_hz)
         self.ground_distance_km = great_circle_km(
             receiver_lat, receiver_lon,
             float(tx_config["tx_lat_deg"]), float(tx_config["tx_lon_deg"]),
@@ -106,17 +120,32 @@ class TransmitterPipeline:
             self.station_id, self.center_freq_hz, self.sweep_rate_hz_per_s,
             self.sweep_bw_hz, self.ground_distance_km, self.tdma_offset_samples)
 
-    def process_cpi(self, rx_samples, cpi_start_utc: datetime):
+    def replica_start_samples(self, cpi_start_ns: int) -> float:
+        """The CPI sample where this TX's sweep crosses the channel centre
+        (make_replica's phase_offset_samples): its configured sweep-start
+        phase after the UTC second, plus half a sweep, less the CPI's own
+        phase after the second."""
+        n = int(round(self.sample_rate_hz / self.sweep_repetition_hz))
+        return (self.tdma_offset_samples + self.sweep_s * self.sample_rate_hz / 2
+                - utc_phase_samples(cpi_start_ns, self.sample_rate_hz, n)) % n
+
+    def process_cpi(self, rx_samples, cpi_start_utc: datetime, *,
+                    cpi_start_ns: Optional[int] = None):
         """Run one CPI through dechirp -> trace -> invert -> write.
+
+        ``cpi_start_ns`` is the UTC label of the first sample in integer
+        nanoseconds; without it the datetime (microseconds) stands in.
 
         Returns (path of the last JSONL write or None, codar.spots rows, one
         per recorded peak).  A dechirp or trace failure raises."""
+        if cpi_start_ns is None:
+            cpi_start_ns = (cpi_start_utc - _EPOCH) // timedelta(microseconds=1) * 1000
         result = dechirp(
             rx_samples,
             sample_rate_hz=self.sample_rate_hz,
             sweep_rate_hz_per_s=self.sweep_rate_hz_per_s,
             sweep_repetition_hz=self.sweep_repetition_hz,
-            phase_offset_samples=self.tdma_offset_samples,
+            phase_offset_samples=self.replica_start_samples(cpi_start_ns),
         )
         ranges_km, profile = positive_range_window(result, range_profile(result))
         # The ground-clutter mask runs here and nowhere else: no arrival row

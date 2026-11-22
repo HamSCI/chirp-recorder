@@ -31,7 +31,9 @@ status = "<radiod-status-dns-name>"
 centre_hz = 4463000
 sample_rate_hz = 64000
 transmitters = ["AGL1"]
-# Only the physics stopgap reads this (samples):
+# Only the physics stopgap reads this: each transmitter's sweep-start phase
+# after the UTC second, in samples at sample_rate_hz.  A codar-sounder value
+# does not carry over (opposite sign, and no UTC reference); re-derive it.
 # tdma_offset_samples = { AGL1 = 0 }
 
 # [physics] is defined with the physics stopgap.
