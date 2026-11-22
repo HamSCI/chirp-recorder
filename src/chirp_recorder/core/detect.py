@@ -34,6 +34,16 @@ REFINE_WINDOW = 64       # samples of the complex matched-filter output around a
 REFINE_UPSAMPLE = 16     # zero-padding factor of that window
 _CHUNK_SAMPLES = 400_000     # samples per block when the interval is re-compressed
 RESIDUE_DB = 12.0       # an "m" residue this far under an arrival is CLEAN's own leftover
+# Slow-time coherence |sum v e^{-i phi_hat t}| / sum |v| under which the fitted
+# Doppler describes no single path (spread night sky wave: 0.03-0.25 on the
+# golden captures).  Provisional: Task 18 fix round 1 chose 0.5 from the
+# golden night's spread of values, which runs continuously from 0.06 to 1.
+DOPPLER_MIN_COHERENCE = 0.5
+# A Doppler-shifted arrival's raw peak sits g * (-f/k) from its Doppler-free
+# delay, with |g| <= 1 set by where the row split cuts the chirp.  So the
+# correction never exceeds |f/k|; past that bound, plus this many samples of
+# CLEAN's own peak error, it has jumped to another path.
+CLIP_MARGIN_SAMPLES = 0.06
 OVERLAP_MAX_RUNG = 6    # ... of another component, or of this rung of a stronger one
 
 
@@ -55,6 +65,12 @@ class Arrival:
     tau_uncorrected_ns: Optional[int] = None    # None reads as "equal to tau_ns"
     doppler_ambiguous: bool = False   # |doppler| > 0.4/P: delay not corrected
     slow: Optional[tuple] = field(default=None, compare=False, repr=False)   # per-sweep complex series at the arrival (PhaseStore)
+    # --- added in Task 18 fix round 1 ---
+    doppler_coherence: Optional[float] = None    # slow-time coherence of the fitted Doppler
+    doppler_sigma_hz: Optional[float] = None     # the slope fit's own sigma
+    doppler_low_coherence: bool = False          # coherence under the gate: no Doppler, no correction
+    doppler_clipped: bool = False                # correction clipped to |f/k|
+    doppler_raw_hz: Optional[float] = None       # the fitted Doppler, published or not
 
     def __post_init__(self):
         if self.tau_uncorrected_ns is None:
@@ -89,18 +105,27 @@ def _slow_time(sweeps: np.ndarray, wf, fs: float, tau_s: float) -> np.ndarray:
 
 
 def _doppler(v: np.ndarray, period_s: float):
-    """phase_rate (rad/s), doppler_hz and carrier phase at mid-interval."""
+    """phase_rate (rad/s), doppler_hz, carrier phase at mid-interval, the
+    slow-time coherence and the Doppler's sigma (Hz) from the slope fit."""
     m = v.size
     if m < 2:
-        return None, None, None
+        return None, None, None, None, None
     ph = np.unwrap(np.angle(v))
     t = np.arange(m) * period_s
     # Least-squares slope over every sweep, not first minus last.  Slow-time
     # sampling aliases |doppler| above 1 / (2 * period).
-    rate = float(np.polyfit(t, ph, 1)[0])
+    sigma_hz = None
+    if m >= 4:
+        coef, cov = np.polyfit(t, ph, 1, cov=True)
+        rate = float(coef[0])
+        sigma_hz = float(np.sqrt(max(cov[0, 0], 0.0)) / (2 * np.pi))
+    else:
+        rate = float(np.polyfit(t, ph, 1)[0])
     t_mid = m * period_s / 2
     z = np.sum(v * np.exp(-1j * rate * (t - t_mid)))
-    return rate, rate / (2 * np.pi), float(np.angle(z))
+    tot = float(np.sum(np.abs(v)))
+    coherence = float(abs(z) / tot) if tot > 0 else 0.0
+    return rate, rate / (2 * np.pi), float(np.angle(z)), coherence, sigma_hz
 
 
 def _derotated_profile(sweeps, wf, fs, dop_hz):
@@ -120,22 +145,18 @@ def _derotated_profile(sweeps, wf, fs, dop_hz):
     return acc / m
 
 
-def _refined_tau(sweeps, wf, fs, tau_s, dop_hz):
-    """Delay at the peak near ``tau_s`` of the complex matched-filter output.
+@lru_cache(maxsize=256)
+def _template(wf, fs, tau_s):
+    """One noiseless gated sweep at tau_s and its plain profile's peak power."""
+    g = gated(wf, fs, tau_s)
+    return g, float(matched_profile(g[None, :], wf, fs).max())
 
-    CLEAN refines its peak with a 3-point parabola in log power, which biases
-    a delay by up to ~190 ns at 64 kS/s (and 1.8 us at fs/B = 1.3), depending
-    on where it falls between samples.  Here the complex output of each sweep,
-    with ``dop_hz`` removed, is cut to REFINE_WINDOW samples around the peak,
-    zero-padded REFINE_UPSAMPLE times by FFT (the output is band-limited, so
-    this interpolates it), averaged in power over the sweeps, and the same
-    log-parabola is applied on the fine grid.  Measured bias: under 4 ns
-    across fs/B = 1.29 .. 7.46 (tests).  Blocks keep the temporaries small.
-    """
+
+def _fine_power(sweeps, wf, fs, cols, dop_hz):
+    """Mean power over the sweeps of the complex matched-filter output on
+    ``cols``, zero-padded REFINE_UPSAMPLE times (band-limited interpolation)."""
     m, n = sweeps.shape
-    W, up = REFINE_WINDOW, REFINE_UPSAMPLE
-    i0 = int(round(tau_s * fs))
-    cols = (np.arange(i0 - W // 2, i0 + W // 2)) % n
+    W, up = cols.size, REFINE_UPSAMPLE
     rfc = np.conj(np.fft.fft(replica(wf, fs)))
     win = np.empty((m, W), complex)
     step = max(1, _CHUNK_SAMPLES // n)
@@ -149,38 +170,110 @@ def _refined_tau(sweeps, wf, fs, tau_s, dop_hz):
     Fp = np.zeros((m, W * up), complex)
     Fp[:, :W // 2] = F[:, :W // 2]
     Fp[:, -W // 2:] = F[:, W // 2:]
-    p = np.mean(np.abs(np.fft.ifft(Fp, axis=1)) ** 2, axis=0)
+    return np.mean(np.abs(np.fft.ifft(Fp, axis=1)) ** 2, axis=0)
+
+
+def _refined_tau(sweeps, wf, fs, tau_s, dop_hz, others=()):
+    """Delay at the peak near ``tau_s`` of the complex matched-filter output.
+
+    CLEAN refines its peak with a 3-point parabola in log power, which biases
+    a delay by up to ~190 ns at 64 kS/s (and 1.8 us at fs/B = 1.3), depending
+    on where it falls between samples.  Here the complex output of each sweep,
+    with ``dop_hz`` removed, is cut to REFINE_WINDOW samples around the peak,
+    zero-padded REFINE_UPSAMPLE times by FFT (the output is band-limited, so
+    this interpolates it), averaged in power over the sweeps, and the same
+    log-parabola is applied on the fine grid.  Measured bias: under 4 ns
+    across fs/B = 1.29 .. 7.46 (tests).  Blocks keep the temporaries small.
+
+    ``others`` holds CLEAN's other components as (tau_s, amplitude), the
+    amplitude being the peak power CLEAN's joint fit gave each.  Their
+    noiseless responses, interpolated the same way, come off the fine power
+    first, so a neighbour's skirt or rung does not drag this peak (Task 18
+    fix round 1, I2: the delay comes from CLEAN's fitted arrival, not the raw
+    peak).  CLEAN fits power, so a coherent cross term stays (overlap_flag).
+    """
+    m, n = sweeps.shape
+    W, up = REFINE_WINDOW, REFINE_UPSAMPLE
+    i0 = int(round(tau_s * fs))
+    cols = (np.arange(i0 - W // 2, i0 + W // 2)) % n
+    p = _fine_power(sweeps, wf, fs, cols, dop_hz)
+    for tau_o, amp in others:
+        g, peak = _template(wf, fs, float(tau_o))
+        if amp > 0 and peak > 0:
+            p = p - (amp / peak) * _fine_power(g[None, :], wf, fs, cols, 0.0)
     c0 = (W // 2) * up                 # fine index of the sample at tau_s
     lo = c0 - 3 * up                   # look within 3 samples only: a neighbour's
     j = lo + int(np.argmax(p[lo:c0 + 3 * up + 1]))   # peak in the window is not ours
+    p = np.maximum(p, p[j] * 1e-6)
     la, lb, lc = np.log(p[j - 1]), np.log(p[j]), np.log(p[j + 1])
     den = la - 2 * lb + lc
     jj = j + (0.5 * (la - lc) / den if den < 0 else 0.0)
     return (((i0 - W // 2) + jj / up) / fs) % wf.period_s
 
 
-def _doppler_free_tau(sweeps, wf, fs, tau_raw_s, dop_hz):
-    """Delay of one arrival with its Doppler removed.
+def _amplitudes(profile, comps, wf, fs) -> list:
+    """CLEAN's joint fit of every component's peak power (profile units)."""
+    if not comps:
+        return []
+    sig = np.asarray(profile, float) - float(np.median(profile))
+    A = np.stack([_template_response(wf, fs, c.tau_s) for c in comps], axis=1)
+    return [float(a) for a in np.linalg.lstsq(A, sig, rcond=None)[0]]
 
-    Range-Doppler coupling: a Doppler shift f turns k*(t - tau) into
-    k*(t - (tau - f/k)), so the matched filter peaks at tau - f/k, k the
-    waveform's signed rate (the sign flips with sweep direction).  CLEAN's
-    template assumes f = 0; 0.2 Hz over a 1 s sweep distorts the response
-    enough that CLEAN, then +f/k, leaves about 1.4 us.  So remove the measured
-    Doppler from the interval and run CLEAN again, which keeps its joint fit
-    of any neighbours; take the component nearest tau_raw + f/k (none within
-    3 cells: tau_raw + f/k itself), then refine it (_refined_tau).
+
+@lru_cache(maxsize=256)
+def _template_response(wf, fs, tau_s):
+    g, peak = _template(wf, fs, tau_s)
+    r = matched_profile(g[None, :], wf, fs) / peak
+    r.setflags(write=False)
+    return r
+
+
+def _others(comps, amps, c):
+    """The components to remove before refining ``c``: every other one except
+    c's own main-lobe residues and rungs (tagged with c as parent), which hold
+    part of c's own power."""
+    return tuple((o.tau_s, a) for o, a in zip(comps, amps)
+                 if o is not c and a > 0 and getattr(o, "parent_tau_s", None) != c.tau_s)
+
+
+def _clip_correction(tau_s, tau_raw_s, dop_hz, rate_hz_per_s, period_s, margin_s=0.0):
+    """(tau, clipped): ``tau_s`` held within |f/k| + margin of ``tau_raw_s``,
+    the physics bound on range-Doppler coupling (|g| <= 1)."""
+    bound = abs(dop_hz / rate_hz_per_s) + margin_s
+    d = ((tau_s - tau_raw_s + period_s / 2) % period_s) - period_s / 2
+    if abs(d) <= bound:
+        return tau_s, False
+    return (tau_raw_s + np.sign(d) * bound) % period_s, True
+
+
+def _doppler_free_tau(sweeps, wf, fs, tau_raw_s, dop_hz):
+    """Delay of one arrival with its Doppler removed, and whether it was clipped.
+
+    The raw peak sits g * (-f/k) from the Doppler-free delay, where g in
+    [-1, 1] depends on where the row cut from sample 0 splits the chirp (a
+    capture starts at any phase of the sweep; Task 18 review, section 1).  So
+    remove the measured Doppler from the interval and run CLEAN again, which
+    keeps its joint fit of any neighbours; take the component nearest
+    tau_raw within |f/k| plus one sample (none: tau_raw itself), refine it
+    with the other components removed (_refined_tau), and clip the result to
+    |f/k| + CLIP_MARGIN_SAMPLES of tau_raw.
     """
-    expect = (tau_raw_s + dop_hz / wf.rate_hz_per_s) % wf.period_s
-    comps, _ = clean(_derotated_profile(sweeps, wf, fs, dop_hz), wf, fs,
-                     floor_db=FLOOR_DB, max_comp=MAX_COMPONENTS)
     P = wf.period_s
-    best = min(comps, key=lambda c: abs(((c.tau_s - expect + P / 2) % P) - P / 2),
-               default=None)
-    coarse = expect
-    if best is not None and abs(((best.tau_s - expect + P / 2) % P) - P / 2) < 3 / wf.bandwidth_hz():
-        coarse = best.tau_s
-    return _refined_tau(sweeps, wf, fs, coarse, dop_hz)
+    prof = _derotated_profile(sweeps, wf, fs, dop_hz)
+    comps, _ = clean(prof, wf, fs, floor_db=FLOOR_DB, max_comp=MAX_COMPONENTS)
+    comps = tag_ladder(comps, wf)
+
+    def dist(a, b):
+        return abs(((a - b + P / 2) % P) - P / 2)
+
+    radius = abs(dop_hz / wf.rate_hz_per_s) + 1.0 / fs
+    near = [c for c in comps if dist(c.tau_s, tau_raw_s) <= radius]
+    best = min(near, key=lambda c: dist(c.tau_s, tau_raw_s), default=None)
+    coarse = best.tau_s if best is not None else tau_raw_s
+    others = _others(comps, _amplitudes(prof, comps, wf, fs), best) if best is not None else ()
+    tau = _refined_tau(sweeps, wf, fs, coarse, dop_hz, others=others)
+    return _clip_correction(tau, tau_raw_s, dop_hz, wf.rate_hz_per_s, P,
+                            margin_s=CLIP_MARGIN_SAMPLES / fs)
 
 
 @lru_cache(maxsize=8)
@@ -290,6 +383,7 @@ def detect_group(samples: np.ndarray, *, fs: int, channel_centre_hz: float,
 
     comps, _ = clean(profile, wf, fs, floor_db=FLOOR_DB, max_comp=MAX_COMPONENTS)
     comps = tag_ladder(comps, wf)
+    amps = _amplitudes(profile, comps, wf, fs)
 
     rejected: dict = {}
     arrivals = []
@@ -312,30 +406,47 @@ def detect_group(samples: np.ndarray, *, fs: int, channel_centre_hz: float,
         sigma_stat = 1e9 * np.sqrt(3) / (np.pi * B * np.sqrt(2 * snr * m))
         sigma = float(sigma_stat)   # the refine's own bias measures < 4 ns: no term
         v = _slow_time(sweeps, wf, fs, c.tau_s)
-        rate, dop, cph = _doppler(v, wf.period_s)
+        rate, dop_raw, cph, coh, dop_sigma = _doppler(v, wf.period_s)
+        low = dop_raw is not None and coh < DOPPLER_MIN_COHERENCE
+        dop = None if low else dop_raw
         sc = compute_scintillation(v, sample_rate_hz=1.0 / wf.period_s,
                                    convention=HF_OBLIQUE)
         known = sc.confidence > 0
         tau_raw_ns = int(round(c.tau_s * 1e9))
-        tau_ns = tau_raw_ns
         dops[id(c)] = dop
         ambiguous = dop is not None and abs(dop) > DOPPLER_AMBIGUOUS / wf.period_s
+        clipped = False
         if dop is not None and not ambiguous:
             # Range-Doppler coupling, corrected (see _doppler_free_tau).  No
-            # Doppler estimate, or one that may alias (|f| > 0.4 / period):
-            # no correction.
-            tau_ns = int(round(_doppler_free_tau(sweeps, wf, fs, c.tau_s, dop) * 1e9))
+            # usable Doppler (none, incoherent, or one that may alias):
+            # no correction, and the delay keeps CLEAN's arrival, refined.
+            tau_s, clipped = _doppler_free_tau(sweeps, wf, fs, c.tau_s, dop)
+            tau_ns = int(round(tau_s * 1e9))
+            if dop_sigma is not None:
+                # the correction moves the delay by up to |f/k|; its error by sigma_f/|k|
+                sigma = float(np.hypot(sigma, dop_sigma / abs(wf.rate_hz_per_s) * 1e9))
+        elif low:
+            # Doppler gated off: publish CLEAN's own (uncorrected) delay.  A
+            # refine on the raw sweeps would read a spread, fading path's power
+            # differently from CLEAN's fit (up to 2.4 us on the golden night)
+            # with nothing to say which is right.
+            tau_ns = tau_raw_ns
         else:
-            tau_ns = int(round(_refined_tau(sweeps, wf, fs, c.tau_s, 0.0) * 1e9))
+            tau_ns = int(round(_refined_tau(sweeps, wf, fs, c.tau_s, 0.0,
+                                            others=_others(comps, amps, c)) * 1e9))
         kept.append(c)
         arrivals.append(Arrival(
             tau_ns=tau_ns, tau_uncorrected_ns=tau_raw_ns,
             doppler_ambiguous=bool(ambiguous), delay_sigma_ns=float(sigma),
             level_db=float(c.level_db), margin_db=float(margin), half_band_db=float(hb),
-            clean_tag=c.tag, doppler_hz=dop, phase_rate=rate, carrier_phase_rad=cph,
+            clean_tag=c.tag, doppler_hz=dop, phase_rate=None if low else rate,
+            carrier_phase_rad=cph,
             s4=float(sc.s4_index) if known else None,
             sigma_phi_rad=float(sc.sigma_phi_rad) if known else None,
-            slow=tuple(np.asarray(v).tolist())))
+            slow=tuple(np.asarray(v).tolist()),
+            doppler_coherence=coh, doppler_sigma_hz=dop_sigma,
+            doppler_low_coherence=bool(low), doppler_clipped=bool(clipped),
+            doppler_raw_hz=dop_raw))
     arrivals = [replace(a, overlap_flag=_overlaps(c, comps, wf, fs, a.delay_sigma_ns, dops, m))
                 for a, c in zip(arrivals, kept)]
     return GroupResult(group, m, null_max, null_med, gate, arrivals, rejected,

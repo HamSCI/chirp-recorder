@@ -34,15 +34,17 @@ Each `index.txt` line labels the capture's first sample:
 
 The hf-timestd minute rows that would place `in_idx0` on T6's ruler
 (`relabel.py`) got pruned before the pull. So `replay()` labels each capture
-from `t0`, and a capture counts as T6 only when its `tier` reads `T6`.
-K3LR has 14 such captures and W2NAF 11.
+from `t0`, and no such row claims T6. The line's `tier` and `sigma_ns`
+describe hf-timestd's authority, not this label, and travel only as
+engineering.
 
 On this night `t0` scatters from capture to capture against radiod's own
 input counter, across 200 ms at K3LR and 420 ms at W2NAF. The label
-cancels out of the comparison with `clean.py`, but no arrival cluster forms
-across captures on it. So the ground-wave test stays an expected failure for
-this night. A night with its minute rows, or with labels that hold, should
-make it pass.
+cancels out of the comparison with `clean.py`. The ground-wave test places
+each capture by the counter instead (`replay.counter_labels`: `in_idx0 /
+in_rate` plus the run's epoch). That keeps the spacing between captures
+exact and leaves one unknown offset per run, which a delay hold does not
+need.
 
 ## Keep them
 

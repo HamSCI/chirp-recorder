@@ -57,7 +57,12 @@ def rows_for_group(result, *, label, reporter_id: str, radiod: str, channel: str
             detector_version=detector_version,
             engineering={**eng, "tau_uncorrected_ns": _s(int(a.tau_uncorrected_ns)),
                          "overlap_flag": _s(bool(a.overlap_flag)),
-                         "doppler_ambiguous": _s(bool(a.doppler_ambiguous))},
+                         "doppler_ambiguous": _s(bool(a.doppler_ambiguous)),
+                         "doppler_coherence": _s(a.doppler_coherence),
+                         "doppler_sigma_hz": _s(a.doppler_sigma_hz),
+                         "doppler_low_coherence": _s(bool(a.doppler_low_coherence)),
+                         "doppler_clipped": _s(bool(a.doppler_clipped)),
+                         "doppler_raw_hz": _s(a.doppler_raw_hz)},
             **prov))
 
     tx_ids = result.group.tx_ids

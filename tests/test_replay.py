@@ -11,6 +11,7 @@ import pytest
 from hamsci_dsp.chirp.waveform import Waveform
 
 from chirp_recorder.core.channels import Group
+from chirp_recorder.core.compare import clusters
 from chirp_recorder.core.replay import replay
 
 FS = 64_000
@@ -55,12 +56,17 @@ def test_without_minutes_each_capture_takes_its_own_index_label(capture_dir):
         assert r["engineering"]["label_source"] == "index"
         assert r["engineering"]["label_utc_ns"] == str(T0_NS)
         assert abs(r["delay_ns"] - (T0_NS + round(TAU_S * 1e9)) % 10**9) < 50
-    # tier T6 gets the T6 block, with the label's sigma as its clock-tie error
-    assert a["u_epoch_ns"] == 1000.0 and a["origin"] == "t6_anchor"
-    assert a["engineering"]["label_tier"] == "T6"
-    # any other tier gets the null block and names its basis
-    assert b["u_epoch_ns"] is None and b["engineering"]["delay_basis"] == "authority"
+    # An index label never claims T6, whatever tier its line names: on the golden
+    # night those labels scatter 200-420 ms against radiod's counter while
+    # claiming 1-5 us.  Null block; the line's tier and sigma stay as engineering.
+    for r in (a, b):
+        assert r["u_epoch_ns"] is None and r["origin"] == ""
+        assert r["engineering"]["delay_basis"] == "index"
+    assert a["engineering"]["label_tier"] == "T6" and a["engineering"]["label_sigma_ns"] == "1000"
+    assert b["engineering"]["label_tier"] == "T5"
     assert b["engineering"]["label_sigma_ns"] == "10206461"
+    six = [dict(r, time=f"2026-11-20T0{i}:00:00Z") for i in range(6) for r in rows]
+    assert clusters(six, producer="chirp-recorder") == []
 
 
 def test_with_minutes_the_nearest_anchor_in_the_run_labels_the_capture(capture_dir):
@@ -121,3 +127,49 @@ def test_replay_subcommand_prints_one_json_row_per_arrival(capture_dir, capsys):
     rows = [json.loads(s) for s in lines]
     assert rows and {r["engineering"]["label_source"] for r in rows} == {"index"}
     assert any(abs(r["delay_ns"] - (T0_NS + round(TAU_S * 1e9)) % 10**9) < 50 for r in rows)
+    assert main(["replay", str(capture_dir), "--gate-us", "1945.6", "--label", "counter"]) == 0
+    rows = [json.loads(s) for s in capsys.readouterr().out.splitlines()]
+    assert rows and {r["engineering"]["label_source"] for r in rows} == {"counter"}
+
+
+# --- fix round 1: captures placed by radiod's input counter ------------------
+def test_counter_label_places_x0_by_the_input_counter_on_the_runs_epoch(capture_dir):
+    """utc(x[0]) = in_idx0 / in_rate + the run's input epoch (GPS seconds,
+    the median over the run's lines) + GPS-to-UTC.  The per-line t0 and its
+    per-line epoch jitter never enter, so captures of one run stay consistent
+    to the counter's own precision."""
+    from ka9q.rtp_recorder import GPS_LEAP_SECONDS, GPS_UTC_OFFSET
+    from chirp_recorder.core.replay import counter_labels
+    idx_a, idx_b = 4_637_344_608_000.0, 4_637_344_608_000.0 + 1800 * RATE
+    lines = (_line("a.npy", in_idx0=idx_a)
+             + _line("b.npy", in_idx0=idx_b, t0="2026-11-20T06:00:01.703230+00:00")
+             .replace(f'"in_epoch":{EPOCH}', f'"in_epoch":{EPOCH + 0.004}'))
+    (capture_dir / "index.txt").write_text(lines)
+    labels = counter_labels(capture_dir, fs=FS, channel_centre_hz=4.463e6)
+    epoch_ns = round((EPOCH + 0.002) * 1e9)                 # median of the two lines
+    off = (GPS_UTC_OFFSET - GPS_LEAP_SECONDS) * 10**9
+    assert abs(labels["a.npy"] - (int(idx_a) * 10**9 // RATE + epoch_ns + off)) < 1_000
+    assert labels["b.npy"] - labels["a.npy"] == 1800 * 10**9      # exactly the counter's
+    rows = replay(capture_dir, [], GROUPS, fs=FS, channel_centre_hz=4.463e6, label="counter")
+    a, b = _arrival(rows, "a.npy"), _arrival(rows, "b.npy")
+    assert a["engineering"]["label_source"] == "counter" and a["u_epoch_ns"] is None
+    assert a["engineering"]["delay_basis"] == "counter"
+    assert a["delay_ns"] == b["delay_ns"]        # same synthetic capture, same phase
+
+
+def test_relabel_rows_refolds_delays_onto_new_labels(capture_dir):
+    from chirp_recorder.core.replay import relabel_rows
+    (capture_dir / "index.txt").write_text(_line("a.npy"))
+    rows = replay(capture_dir, [], GROUPS, fs=FS, channel_centre_hz=4.463e6)
+    moved = relabel_rows(rows, {"a.npy": T0_NS + 7_000_123}, source="counter")
+    (r0,), (r1,) = rows, moved
+    assert r1["delay_ns"] == (r0["delay_ns"] + 7_000_123) % 10**9
+    assert r1["engineering"]["label_source"] == "counter"
+    assert r1["engineering"]["label_utc_ns"] == str(T0_NS + 7_000_123)
+    assert r0["engineering"]["label_source"] == "index"          # the input stays
+
+
+def test_an_unknown_label_mode_is_refused(capture_dir):
+    (capture_dir / "index.txt").write_text(_line("a.npy"))
+    with pytest.raises(ValueError, match="label"):
+        replay(capture_dir, [], GROUPS, fs=FS, channel_centre_hz=4.463e6, label="host")

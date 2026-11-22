@@ -56,9 +56,10 @@ def test_sigma_shrinks_with_level(synth):
     weak = detect_group(synth(fs=64_000, arrivals=[(0.0429, 0.1)], seconds=30), fs=64_000,
                         channel_centre_hz=4.463e6, group=GROUP_4463).arrivals[0]
     assert strong.delay_sigma_ns < weak.delay_sigma_ns
-    # the bound, verbatim
+    # the bound, verbatim, plus the Doppler correction's sigma_f/|k| (fix round 1)
     B = WF_4463.bandwidth_hz()
     want = 1e9 * np.sqrt(3) / (np.pi * B * np.sqrt(2 * 10 ** (strong.level_db / 10) * 30))
+    want = np.hypot(want, strong.doppler_sigma_hz / abs(WF_4463.rate_hz_per_s) * 1e9)
     assert abs(strong.delay_sigma_ns - want) < 1e-6 * want
 
 
@@ -321,3 +322,102 @@ def test_coherent_pair_twenty_db_down_one_ms_away_is_flagged(synth):
     r = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463)
     sky = [a for a in r.arrivals if a.tau_ns > 4_800_000]
     assert sky and all(a.overlap_flag for a in sky)
+
+
+# --- Task 18 fix round 1: Doppler quality gate, physics bound, isolated refine --
+from hamsci_dsp.chirp.waveform import gated as _gated  # noqa: E402
+
+K_4463 = -25_733.913
+
+
+def _incoherent(wf, fs, arrivals, m=30, seed=3):
+    """Sweeps whose arrivals carry a fresh random carrier phase every sweep
+    (no coherent Doppler at all), as (tau_s, amplitude, coherent?) triples."""
+    rng = np.random.default_rng(seed)
+    sw = []
+    for _ in range(m):
+        s = np.zeros(int(wf.period_s * fs), complex)
+        for tau, amp, coherent in arrivals:
+            ph = 1.0 if coherent else np.exp(2j * np.pi * rng.random())
+            s += amp * ph * _gated(wf, fs, tau)
+        sw.append(s)
+    x = np.concatenate(sw)
+    x += 0.01 * (rng.standard_normal(x.size) + 1j * rng.standard_normal(x.size))
+    return x.astype(np.complex64)
+
+
+def test_an_incoherent_arrival_publishes_no_doppler_and_no_correction():
+    """Slow-time coherence under DOPPLER_MIN_COHERENCE: the fitted Doppler has
+    nothing to do with one path, so the delay stays uncorrected, the row
+    carries no Doppler, and the arrival says why."""
+    from chirp_recorder.core.detect import DOPPLER_MIN_COHERENCE
+    x = _incoherent(WF_4463, 64_000, [(0.0429, 1.0, False)])
+    (a,) = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals
+    assert a.doppler_low_coherence is True and a.doppler_coherence < DOPPLER_MIN_COHERENCE
+    assert a.doppler_hz is None and a.phase_rate is None
+    assert abs(a.tau_ns - 42_900_000) < 300
+    assert abs(a.tau_ns - a.tau_uncorrected_ns) < 300
+
+
+def test_a_coherent_doppler_is_kept_and_corrected(synth):
+    x = synth(fs=64_000, arrivals=[(0.0429, 1.0)], seconds=30, doppler_hz=0.2)
+    (a,) = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals
+    assert a.doppler_low_coherence is False and a.doppler_coherence > 0.9
+    assert abs(a.doppler_hz - 0.2) < 0.02 and abs(a.tau_ns - 42_900_000) < 500
+
+
+def test_delay_sigma_carries_the_doppler_sigma_over_k(synth):
+    x = synth(fs=64_000, arrivals=[(0.0429, 0.3)], seconds=30, doppler_hz=0.2, noise=3.0)
+    (a,) = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals
+    assert a.doppler_sigma_hz is not None and a.doppler_sigma_hz > 0
+    snr = 10 ** (a.level_db / 10)
+    stat = 1e9 * np.sqrt(3) / (np.pi * WF_4463.bandwidth_hz() * np.sqrt(2 * snr * 30))
+    want = np.hypot(stat, a.doppler_sigma_hz / abs(K_4463) * 1e9)
+    assert a.delay_sigma_ns == pytest.approx(want, rel=1e-6)
+
+
+def test_the_correction_is_clipped_to_the_physics_bound():
+    """|g| <= 1: the peak of a Doppler-shifted arrival moves by at most |f/k|
+    from its Doppler-free delay, whatever the row split.  A correction past
+    that lands on another path; clip it and say so."""
+    from chirp_recorder.core.detect import _clip_correction
+    raw, f, P = 0.042, -0.223, 1.0
+    bound = abs(f / K_4463)                                   # 8.67 us
+    tau, clipped = _clip_correction(raw + 44.7e-6, raw, f, K_4463, P)
+    assert clipped and tau == pytest.approx(raw + bound, abs=1e-12)
+    tau, clipped = _clip_correction(raw - 3e-6, raw, f, K_4463, P)
+    assert not clipped and tau == pytest.approx(raw - 3e-6, abs=1e-12)
+    tau, clipped = _clip_correction(0.9999995 - 20e-6, 0.0000005, f, K_4463, P)  # across 0
+    assert clipped and tau == pytest.approx((0.0000005 - bound) % P, abs=1e-12)
+
+
+@pytest.mark.parametrize("sep", [6.3, 7.3, 9.3])
+def test_the_refine_reads_the_arrival_with_its_neighbours_removed(sep):
+    """A strong neighbour's skirt drags a raw zero-padded refine by 1.5-6 us
+    (sep 6.3-9.3 samples, neighbour 14 dB up).  The weak arrival's phase turns
+    whole cycles over the sweeps, so the cross term averages to zero and only
+    the skirt remains.  Refining with CLEAN's other components removed
+    recovers the weak arrival's delay."""
+    from chirp_recorder.core.detect import _refined_tau
+    fs, t1 = 64_000, 0.00412
+    t2 = t1 + sep / fs
+    g1, g2 = _gated(WF_4463, fs, t1), _gated(WF_4463, fs, t2)
+    sw = np.array([g1 + 0.2 * np.exp(2j * np.pi * k / 60) * g2 for k in range(60)])
+    from hamsci_dsp.chirp.clean import matched_profile
+    peak1 = float(matched_profile(g1[None, :], WF_4463, fs).max())   # its CLEAN amplitude
+    assert abs(_refined_tau(sw, WF_4463, fs, t2, 0.0) - t2) * 1e9 > 1_000   # the old reading
+    got = _refined_tau(sw, WF_4463, fs, t2, 0.0, others=((t1, peak1),))
+    assert abs(got - t2) * 1e9 < 200
+
+
+def test_a_weak_neighbour_is_timed_with_the_strong_one_removed(synth):
+    """Weak path 14 dB down, 7.3 samples (114 us) from a strong one, 2/60 Hz
+    differential Doppler over 60 sweeps: the cross term averages out, and
+    the delay must come from CLEAN's fitted arrival, not the strong skirt."""
+    t2 = 0.00412 + 7.3 / 64_000
+    x = synth(fs=64_000, arrivals=[(0.00412, 1.0, 0.0), (t2, 0.2, 2 / 60)], seconds=60,
+              noise=0.01)
+    r = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463)
+    weak = [a for a in r.arrivals if a.tau_uncorrected_ns > 4_160_000]
+    assert weak, [a.tau_ns for a in r.arrivals]
+    assert abs(weak[0].tau_ns - round((0.00412 + 7.3 / 64_000) * 1e9)) < 300

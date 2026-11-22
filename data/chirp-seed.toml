@@ -28,6 +28,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 40.969333
 lon = -72.1237
+gate_period_s = 0.0019456
 
 [transmitters.ANGL]
 kind = "codar"
@@ -64,6 +65,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 38.205017
 lon = -75.1529
+gate_period_s = 0.0019456
 
 [transmitters.BIGC]
 kind = "codar"
@@ -91,6 +93,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 41.1528
 lon = -71.551183
+gate_period_s = 0.0019456
 
 [transmitters.BML1]
 kind = "codar"
@@ -136,6 +139,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 39.378367
 lon = -74.399017
+gate_period_s = 0.0019456
 
 [transmitters.BRMR]
 kind = "codar"
@@ -190,6 +194,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 37.6733
 lon = -75.593033
+gate_period_s = 0.0019456
 
 [transmitters.CMPT]
 kind = "codar"
@@ -379,6 +384,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 40.586783
 lon = -73.589817
+gate_period_s = 0.0019456
 
 [transmitters.HILL]
 kind = "codar"
@@ -415,6 +421,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 40.4301
 lon = -73.983583
+gate_period_s = 0.0019456
 
 [transmitters.KAL1]
 kind = "codar"
@@ -451,6 +458,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 36.691717
 lon = -75.922633
+gate_period_s = 0.0019456
 
 [transmitters.LOO1]
 kind = "codar"
@@ -469,6 +477,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 39.736233
 lon = -74.11705
+gate_period_s = 0.0019456
 
 [transmitters.LUIS]
 kind = "codar"
@@ -586,6 +595,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 40.788183
 lon = -72.74525
+gate_period_s = 0.0019456
 
 [transmitters.NANT]
 kind = "codar"
@@ -595,6 +605,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 41.25045
 lon = -69.974067
+gate_period_s = 0.0019456
 
 [transmitters.NAPL]
 kind = "codar"
@@ -613,6 +624,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 41.844217
 lon = -69.947233
+gate_period_s = 0.0019456
 
 [transmitters.NIC1]
 kind = "codar"
@@ -640,6 +652,7 @@ period_s = 1.0
 sweep_bw_hz = 25734.0
 lat = 35.103
 lon = -75.960433
+gate_period_s = 0.0019456
 
 [transmitters.OLDB]
 kind = "codar"

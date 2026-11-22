@@ -213,7 +213,8 @@ def _handle_replay(args) -> int:
               f"{args.centre_hz:.0f} Hz", file=sys.stderr)
         return 2
     rows = replay(Path(args.capture_dir), [Path(m) for m in args.minutes or []], groups,
-                  fs=args.fs, channel_centre_hz=args.centre_hz, reporter_id=args.reporter_id)
+                  fs=args.fs, channel_centre_hz=args.centre_hz, reporter_id=args.reporter_id,
+                  label=args.label)
     for r in rows:
         print(json.dumps(r, separators=(",", ":")))
     return 0
@@ -221,7 +222,8 @@ def _handle_replay(args) -> int:
 
 def _handle_compare(args) -> int:
     from chirp_recorder.config import ConfigError, load_instance
-    from chirp_recorder.core.compare import compare, read_sink_rows
+    from chirp_recorder.core.compare import (compare, read_jsonl_rows, read_sink_rows,
+                                             rung_spacings)
     _setup_logging(False)
     keys = _keys(args)
     if len(keys) != 1:
@@ -238,17 +240,24 @@ def _handle_compare(args) -> int:
         print(f"chirp-recorder: no sink to read ({db or 'no sink path set'})", file=sys.stderr)
         return 2
     window = dict(reporter_id=cfg.reporter_id, since_iso=args.since, until_iso=args.until)
-    chirp = read_sink_rows(Path(db), producer="chirp-recorder", **window)
+    # chirp-recorder: its own daily JSONL, which nothing drains.  codar-sounder
+    # keeps no copy of its arrival rows (only the 7-day phase store, without
+    # Doppler), so its side comes from the sink queue, which its upload
+    # pipeline empties after each send: a window behind the last upload reads
+    # short, and the verdict then says "insufficient".
+    rows_dir = Path(cfg.output_dir) / "rows"
+    chirp = read_jsonl_rows(rows_dir, **window)
     codar = read_sink_rows(Path(db), producer="codar-sounder", **window)
-    # A rung spacing is known only where the group's gate period is.
-    rung_s = {g.waveform.group_key(): 1.0 / (abs(g.waveform.rate_hz_per_s)
-                                             * g.waveform.gate_period_s)
-              for ch in cfg.channels for g in ch.groups if g.waveform.gate_period_s}
-    v = compare(chirp, codar, rung_s=rung_s)
+    sources = {"chirp-recorder": str(rows_dir),
+               "codar-sounder": f"{db} pending_uploads (drained after each upload)"}
+    # A rung spacing is known only where the group's gate period is (the seed
+    # gives the Mid-Atlantic 4.463 MHz group's).
+    rung_s = rung_spacings([g for ch in cfg.channels for g in ch.groups])
+    v = compare(chirp, codar, rung_s=rung_s, match=args.match)
     if args.json:
-        print(json.dumps(v.to_dict(), indent=2))
+        print(json.dumps({**v.to_dict(), "sources": sources}, indent=2))
     else:
-        print(f"{cfg.key}: {v.status}  ({len(chirp)} chirp-recorder rows, "
+        print(f"{cfg.key}: {v.status}, match {v.match}  ({len(chirp)} chirp-recorder rows, "
               f"{len(codar)} codar-sounder rows)")
         for r in v.rows:
             print(f"  {r.name:10s} {r.value!s:>12} limit {r.limit!s:>8} "
@@ -307,11 +316,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--fs", type=int, default=64_000)
     p.add_argument("--gate-us", type=float, help="Pin every group's gate period (us)")
     p.add_argument("--reporter-id", help="Default: the directory's name")
+    p.add_argument("--label", choices=("auto", "counter"), default="auto",
+                   help="auto: relabel by --minutes, else each index.txt label; "
+                        "counter: radiod's input counter, one epoch per run")
 
     p = sub.add_parser("compare", help="Side-by-side verdict against codar-sounder")
     p.add_argument("--instance")
     p.add_argument("--since", required=True, help="ISO UTC, inclusive")
     p.add_argument("--until", default="9999-12-31T23:59:59Z", help="ISO UTC, exclusive")
+    p.add_argument("--match", choices=("bin", "exact"), default="bin",
+                   help="bin (default): within half a codar-sounder range bin + 5 us; "
+                        "exact: within 5 us")
     p.add_argument("--json", action="store_true")
     return parser
 

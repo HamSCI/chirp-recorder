@@ -13,6 +13,20 @@ rows of decision 3 (2026-11-19):
                      within 0.02 Hz (about one codar-sounder bin)
   s4, sigma_phi      reported only: median |difference| (and *_max, largest)
 
+One convention.  codar-sounder's delay holds tau - f/k: its stretch
+processing puts each path's beat tone at -k*tau + f, and it reads tau as
+-f_beat/k (codar-sounder sigmondb.py:91-93).  chirp-recorder's delay_ns holds
+tau, with the Doppler removed (detect.py).  So each chirp-recorder row enters
+the comparison as delay_ns - doppler_hz / rate_hz_per_s, codar-sounder's
+quantity; a chirp-recorder row with no Doppler stays out.
+
+Match mode (provisional, 2026-11-22; Michael decides).  codar-sounder takes
+the integer range bin and refines nothing, so its delay moves in steps of
+one bin, 1 / (period * |rate|) = 38.9 us for the 4.463 MHz group.
+  "bin"    (default) a pair matches when |chirp - codar| <= bin / 2 + tol_ns
+  "exact"  a pair matches when |chirp - codar| <= tol_ns (the brief's rule)
+The verdict names the mode it used.
+
 A codar-sounder cluster with no partner counts as explained, not missed,
 when it sits on a ladder rung of a stronger codar-sounder cluster
 (m x rung, 1 <= |m| <= 4, +-0.3 ms) or 1.632 ms after one (the KFS twin
@@ -29,6 +43,7 @@ from pathlib import Path
 from typing import Optional
 
 PAIR_WINDOW_NS = 120_000          # clusters closer than this pair up (the cluster gap)
+MATCH_MODES = ("bin", "exact")
 RUNG_TOL_NS = 300_000
 MAX_RUNG = 4
 KFS_TWIN_NS = 1_632_000
@@ -49,6 +64,49 @@ class Cluster:
     # Beyond the brief's fields; left out of equality.
     median_level_db: Optional[float] = field(default=None, compare=False)
     spread_ns: Optional[int] = field(default=None, compare=False)   # max - min delay
+    rate_hz_per_s: Optional[float] = field(default=None, compare=False)
+    period_s: float = field(default=1.0, compare=False)
+
+
+def period_of(group_key: str) -> float:
+    """The sweep period a sigmondb group key names (its "Ns" token; 1 s if none)."""
+    for tok in str(group_key).split()[2:]:
+        if tok.endswith("s") and not tok.startswith("sweep"):
+            try:
+                return float(tok[:-1])
+            except ValueError:
+                pass
+    return 1.0
+
+
+def codar_bin_ns(rate_hz_per_s: float, period_s: float) -> float:
+    """codar-sounder's range-bin spacing as a delay, in ns.
+
+    Its dechirp turns FFT bins of one sweep (n = fs * period samples) into
+    delay as fftfreq(n, 1/fs) / |rate| (codar-sounder dechirp.py:265-266), so
+    neighbouring bins stand fs / n / |rate| = 1 / (period * |rate|) apart."""
+    return 1e9 / (float(period_s) * abs(float(rate_hz_per_s)))
+
+
+def rung_spacings(groups) -> dict[str, float]:
+    """{group_key: rung spacing s} for the groups whose gate period is known:
+    1 / (|rate| * gate period)."""
+    return {g.waveform.group_key(): 1.0 / (abs(g.waveform.rate_hz_per_s)
+                                           * g.waveform.gate_period_s)
+            for g in groups if g.waveform.gate_period_s}
+
+
+def to_codar_convention(rows: list[dict]) -> list[dict]:
+    """chirp-recorder rows as codar-sounder measures them: delay_ns - f/k,
+    folded into the sweep period.  Rows without a Doppler or a rate drop out."""
+    out = []
+    for r in rows:
+        f, k = _f(r.get("doppler_hz")), _f(r.get("rate_hz_per_s"))
+        if f is None or not k:
+            continue
+        p_ns = round(period_of(r.get("group_key", "")) * 1e9)
+        out.append(dict(r, delay_ns=(int(r["delay_ns"]) - round(f / k * 1e9)) % p_ns))
+    return out
 
 
 @dataclass(frozen=True)
@@ -73,10 +131,14 @@ class Verdict:
     chirp_only: list        # [Cluster]
     rows: list              # [VerdictRow]
     status: str             # "pass" | "fail" | "insufficient"
+    match: str = "bin"      # the match mode the verdict used
+    codar_bin_ns: dict = field(default_factory=dict)   # group_key -> codar range bin
 
     def to_dict(self) -> dict:
         return {
             "status": self.status,
+            "match": self.match,
+            "codar_bin_ns": dict(self.codar_bin_ns),
             "rows": [{"name": r.name, "value": _num(r.value), "limit": _num(r.limit),
                       "gating": r.gating, "passed": r.passed} for r in self.rows],
             "matched": [[a.median_delay_ns, b.median_delay_ns, d, a.group_key]
@@ -101,14 +163,16 @@ def _median(vals) -> Optional[float]:
 
 
 def clusters(rows: list[dict], *, producer: str, gap_ns: int = 120_000,
-             min_n: int = 6) -> list[Cluster]:
+             min_n: int = 6, t6_only: bool = True) -> list[Cluster]:
     """T6 clusters (rows with u_epoch_ns set) per (reporter_id, group_key).
 
     Sorted by delay, split where neighbours differ by more than gap_ns; a
-    cluster needs rows from at least min_n distinct capture seconds."""
+    cluster needs rows from at least min_n distinct capture seconds.
+    t6_only=False takes every row, for a replay placed by radiod's counter,
+    whose captures agree with each other but carry no T6 tie."""
     by: dict = {}
     for r in rows:
-        if not _is_set(r.get("u_epoch_ns")):
+        if t6_only and not _is_set(r.get("u_epoch_ns")):
             continue
         by.setdefault((r.get("reporter_id", ""), r.get("group_key", "")), []).append(r)
     out: list[Cluster] = []
@@ -132,20 +196,22 @@ def clusters(rows: list[dict], *, producer: str, gap_ns: int = 120_000,
                 median_s4=_median(_f(r.get("s4")) for r in run),
                 median_sigma_phi_rad=_median(_f(r.get("sigma_phi_rad")) for r in run),
                 median_level_db=_median(_f(r.get("level_db")) for r in run),
-                spread_ns=max(d) - min(d)))
+                spread_ns=max(d) - min(d),
+                rate_hz_per_s=_median(_f(r.get("rate_hz_per_s")) for r in run),
+                period_s=period_of(gkey)))
     return out
 
 
-def _pair(chirp: list[Cluster], codar: list[Cluster]):
+def _pair(chirp: list[Cluster], codar: list[Cluster], window_ns=lambda c: PAIR_WINDOW_NS):
     """Nearest chirp cluster for each codar cluster, same reporter and group,
-    within PAIR_WINDOW_NS; each chirp cluster pairs at most once."""
+    within window_ns(codar cluster); each chirp cluster pairs at most once."""
     cands = []
     for i, b in enumerate(codar):
         for j, a in enumerate(chirp):
             if (a.reporter_id, a.group_key) != (b.reporter_id, b.group_key):
                 continue
             d = a.median_delay_ns - b.median_delay_ns
-            if abs(d) <= PAIR_WINDOW_NS:
+            if abs(d) <= window_ns(b):
                 cands.append((abs(d), i, j, d))
     used_i, used_j, pairs = set(), set(), []
     for _, i, j, d in sorted(cands):
@@ -179,10 +245,23 @@ def _explain(c: Cluster, parents: list[Cluster], rung_s: dict) -> Optional[str]:
 
 def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float = 0.9,
             min_matched: int = 3, doppler_tol_hz: float = 0.02,
-            rung_s: dict[str, float]) -> Verdict:
-    chirp = clusters(list(chirp_rows), producer="chirp-recorder")
+            rung_s: dict[str, float], match: str = "bin") -> Verdict:
+    if match not in MATCH_MODES:
+        raise ValueError(f"match must be one of {MATCH_MODES}, not {match!r}")
+    chirp = clusters(to_codar_convention(list(chirp_rows)), producer="chirp-recorder")
     codar = clusters(list(codar_rows), producer="codar-sounder")
-    pairs, paired_codar, paired_chirp = _pair(chirp, codar)
+
+    def bin_ns(c: Cluster) -> float:
+        return codar_bin_ns(c.rate_hz_per_s, c.period_s) if c.rate_hz_per_s else math.nan
+
+    def limit_ns(c: Cluster) -> float:
+        if match == "exact":
+            return float(tol_ns)
+        b = bin_ns(c)
+        return b / 2 + tol_ns if not math.isnan(b) else float(tol_ns)
+
+    pairs, paired_codar, paired_chirp = _pair(
+        chirp, codar, lambda c: max(PAIR_WINDOW_NS, limit_ns(c)))
     pairs.sort(key=lambda p: (p[1].group_key, p[1].median_delay_ns))
 
     # Strongest first; at equal strength a paired cluster comes first, then the
@@ -202,9 +281,13 @@ def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float 
     unmatched.sort(key=lambda c: (c.group_key, c.median_delay_ns))
     chirp_only = [c for j, c in enumerate(chirp) if j not in paired_chirp]
 
-    within = [p for p in pairs if abs(p[2]) <= tol_ns]
+    within = [p for p in pairs if abs(p[2]) <= limit_ns(p[1])]
     worst = float(max((abs(p[2]) for p in pairs), default=math.nan))
-    rows = [VerdictRow("matched", worst, float(tol_ns), True,
+    # One group gives one limit; across groups the row shows the largest and
+    # every pair still meets its own.
+    lim = max((limit_ns(p[1]) for p in pairs), default=limit_ns(codar[0]) if codar
+              else float(tol_ns))
+    rows = [VerdictRow("matched", worst, float(lim), True,
                        len(pairs) >= min_matched and len(within) == len(pairs))]
     unexplained = len(codar) - len(explained)
     cov = len(within) / unexplained if unexplained else math.nan
@@ -223,12 +306,14 @@ def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float 
         rows.append(VerdictRow(name, med, math.nan, False, True))
         rows.append(VerdictRow(f"{name}_max", big, math.nan, False, True))
 
-    if len(chirp) < min_matched or len(codar) < min_matched:
-        status = "insufficient"
+    if len(chirp) < min_matched or len(codar) < min_matched or not dop:
+        status = "insufficient"         # too few clusters, or no Doppler to judge
     else:
         status = "pass" if all(r.passed for r in rows if r.gating) else "fail"
+    bins = {c.group_key: bin_ns(c) for c in codar if c.rate_hz_per_s}
     return Verdict(matched=pairs, codar_unmatched=unmatched, explained=explained,
-                   chirp_only=chirp_only, rows=rows, status=status)
+                   chirp_only=chirp_only, rows=rows, status=status, match=match,
+                   codar_bin_ns=bins)
 
 
 def read_sink_rows(db: Path, *, producer: str, reporter_id: str, since_iso: str,
@@ -247,3 +332,30 @@ def read_sink_rows(db: Path, *, producer: str, reporter_id: str, since_iso: str,
             "AND json_extract(payload_json, '$.time') < ? ORDER BY id",
             (SIGMONDB, ARRIVAL_TABLE, producer, reporter_id, since_iso, until_iso))
         return [json.loads(p) for (p,) in cur]
+
+
+def read_jsonl_rows(rows_dir: Path, *, reporter_id: str, since_iso: str,
+                    until_iso: str) -> list[dict]:
+    """Arrival rows from chirp-recorder's own daily JSONL (<output_dir>/rows/
+    YYYY-MM-DD.jsonl), for one reporter, since <= time < until.
+
+    The writer keeps this copy on the station and nothing drains it, unlike
+    the sink's queue.  Lines that do not parse are skipped."""
+    d = Path(rows_dir)
+    if not d.is_dir():
+        return []
+    out = []
+    for f in sorted(d.glob("????-??-??.jsonl")):
+        if not (since_iso[:10] <= f.stem <= until_iso[:10]):
+            continue
+        for line in f.read_text().splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if (r.get("table") != "arrival" or r.get("reporter_id") != reporter_id
+                    or not (since_iso <= str(r.get("time", "")) < until_iso)):
+                continue
+            r.pop("table", None)
+            out.append(r)
+    return out

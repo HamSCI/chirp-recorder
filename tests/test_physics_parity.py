@@ -200,8 +200,9 @@ GOLDEN_TDMA_SAMPLES = 4_829    # 75.45 ms: 925.88 + 75.45 = 1001.33 ms, so 1.33 
 
 def test_parity_on_a_golden_capture(tmp_path, tx_block, ref_kw, plan_and_txs,
                                     physics_settings, split_into_intervals):
-    """One real K3LR capture (Task 17) through codar-sounder's pipeline and
-    the stopgap: the same records.  The capture holds 30 s, so both sides run
+    """A smoke test on real data: one K3LR capture (Task 17) through
+    codar-sounder's pipeline and the stopgap gives the same records (one, with
+    the hand-picked TDMA offset below; no real slot fits the made-up TX1).  The capture holds 30 s, so both sides run
     a 30 s CPI.  Absent captures fail, naming tests/golden/README.md."""
     import os
 

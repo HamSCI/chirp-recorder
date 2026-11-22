@@ -101,3 +101,16 @@ def test_radiod_basis_label_writes_empty_strings_not_None(result):
     for e in (cap["engineering"], arrs[0]["engineering"]):
         assert e["t_level"] == "" and e["authority_sigma_ns"] == "" and e["chain_delay_ns"] == ""
         assert "None" not in e.values()
+
+
+def test_doppler_quality_travels_in_engineering(result, t6_label):
+    """Task 18 fix round 1: the gate's inputs and verdicts ride with each row."""
+    from dataclasses import replace
+    a = replace(result.arrivals[0], doppler_hz=None, phase_rate=None, doppler_coherence=0.12,
+                doppler_sigma_hz=0.011, doppler_low_coherence=True, doppler_clipped=False,
+                doppler_raw_hz=-0.223)
+    _, (row,) = rows_for_group(replace(result, arrivals=[a]), label=t6_label, **CALL, **KW)
+    e = row["engineering"]
+    assert row["doppler_hz"] is None
+    assert (e["doppler_coherence"], e["doppler_sigma_hz"], e["doppler_low_coherence"],
+            e["doppler_clipped"], e["doppler_raw_hz"]) == ("0.12", "0.011", "1", "0", "-0.223")
