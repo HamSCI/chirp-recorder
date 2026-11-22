@@ -10,4 +10,5 @@ Suite-wide front door: [HamSCI/sigmond docs](https://github.com/HamSCI/sigmond/b
 
 | Doc | Audience | What it gives you |
 |-----|----------|-------------------|
-| [../README.md](../README.md) ★ | all | what chirp-recorder is, install, configure, develop; its only document so far |
+| [../README.md](../README.md) ★ | all | what chirp-recorder is, install, configure, develop |
+| [../tests/golden/README.md](../tests/golden/README.md) | developers | where the golden captures live, and what their labels hold |

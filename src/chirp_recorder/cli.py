@@ -1,5 +1,5 @@
 """chirp-recorder command line: daemon, inventory, validate, version, status,
-stations, config init|edit.
+stations, config init|edit, replay, compare.
 
 The sigmond unit runs `python -m chirp_recorder.cli daemon --instance %i`.
 Every JSON subcommand keeps stdout to the JSON alone; logs go to stderr.
@@ -187,6 +187,75 @@ def _handle_config(args) -> int:
     return configurator.cmd_config_edit(args, _etc(args))
 
 
+def _replay_groups(centre_hz: float, fs: int, gate_us):
+    """The seed's groups a channel at centre_hz and fs can hold; --gate-us
+    pins every group's gate period (else detect.py fits it per capture)."""
+    from dataclasses import replace
+    from chirp_recorder.core.catalogue import load_seed
+    from chirp_recorder.core.channels import USABLE_FRACTION, groups_for
+    half = USABLE_FRACTION * fs / 2
+    txs = [t for t in load_seed().values()
+           if t.centre_hz - t.sweep_bw_hz / 2 >= centre_hz - half
+           and t.centre_hz + t.sweep_bw_hz / 2 <= centre_hz + half]
+    groups = list(groups_for(txs))
+    if gate_us is not None:
+        groups = [replace(g, waveform=replace(g.waveform, gate_period_s=gate_us * 1e-6))
+                  for g in groups]
+    return groups
+
+
+def _handle_replay(args) -> int:
+    from chirp_recorder.core.replay import replay
+    _setup_logging(False)
+    groups = _replay_groups(args.centre_hz, args.fs, args.gate_us)
+    if not groups:
+        print(f"chirp-recorder: no catalogue group fits {args.fs} Hz around "
+              f"{args.centre_hz:.0f} Hz", file=sys.stderr)
+        return 2
+    rows = replay(Path(args.capture_dir), [Path(m) for m in args.minutes or []], groups,
+                  fs=args.fs, channel_centre_hz=args.centre_hz, reporter_id=args.reporter_id)
+    for r in rows:
+        print(json.dumps(r, separators=(",", ":")))
+    return 0
+
+
+def _handle_compare(args) -> int:
+    from chirp_recorder.config import ConfigError, load_instance
+    from chirp_recorder.core.compare import compare, read_sink_rows
+    _setup_logging(False)
+    keys = _keys(args)
+    if len(keys) != 1:
+        print("chirp-recorder: compare needs one instance: pass --instance", file=sys.stderr)
+        return 2
+    try:
+        cfg = load_instance(keys[0], _etc(args))
+    except ConfigError as exc:
+        print(f"chirp-recorder: {exc}", file=sys.stderr)
+        return 2
+    from hs_uploader.sink.writer import sink_path
+    db = sink_path()
+    if not db or not Path(db).exists():
+        print(f"chirp-recorder: no sink to read ({db or 'no sink path set'})", file=sys.stderr)
+        return 2
+    window = dict(reporter_id=cfg.reporter_id, since_iso=args.since, until_iso=args.until)
+    chirp = read_sink_rows(Path(db), producer="chirp-recorder", **window)
+    codar = read_sink_rows(Path(db), producer="codar-sounder", **window)
+    # A rung spacing is known only where the group's gate period is.
+    rung_s = {g.waveform.group_key(): 1.0 / (abs(g.waveform.rate_hz_per_s)
+                                             * g.waveform.gate_period_s)
+              for ch in cfg.channels for g in ch.groups if g.waveform.gate_period_s}
+    v = compare(chirp, codar, rung_s=rung_s)
+    if args.json:
+        print(json.dumps(v.to_dict(), indent=2))
+    else:
+        print(f"{cfg.key}: {v.status}  ({len(chirp)} chirp-recorder rows, "
+              f"{len(codar)} codar-sounder rows)")
+        for r in v.rows:
+            print(f"  {r.name:10s} {r.value!s:>12} limit {r.limit!s:>8} "
+                  f"{'gates' if r.gating else 'reported'} {'ok' if r.passed else 'FAIL'}")
+    return 0 if v.status == "pass" else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chirp-recorder")
     parser.add_argument("--etc", help="Per-instance config directory "
@@ -230,13 +299,28 @@ def build_parser() -> argparse.ArgumentParser:
     pe = cs.add_parser("edit", help="Edit a receiver's config")
     pe.add_argument("--non-interactive", action="store_true")
     pe.add_argument("--instance")
+    p = sub.add_parser("replay", help="Replay codar_grab captures; prints arrival rows (JSONL)")
+    p.add_argument("capture_dir", help="Directory holding index.txt and the .npy captures")
+    p.add_argument("--minutes", nargs="*", help="hf-timestd minute rows (JSONL) to relabel by; "
+                   "without them each capture keeps its index.txt label")
+    p.add_argument("--centre-hz", type=float, default=4_463_000.0)
+    p.add_argument("--fs", type=int, default=64_000)
+    p.add_argument("--gate-us", type=float, help="Pin every group's gate period (us)")
+    p.add_argument("--reporter-id", help="Default: the directory's name")
+
+    p = sub.add_parser("compare", help="Side-by-side verdict against codar-sounder")
+    p.add_argument("--instance")
+    p.add_argument("--since", required=True, help="ISO UTC, inclusive")
+    p.add_argument("--until", default="9999-12-31T23:59:59Z", help="ISO UTC, exclusive")
+    p.add_argument("--json", action="store_true")
     return parser
 
 
 _HANDLERS = {"version": _handle_version, "daemon": _handle_daemon,
              "inventory": _handle_inventory, "validate": _handle_validate,
              "status": _handle_status, "stations": _handle_stations,
-             "config": _handle_config}
+             "config": _handle_config, "replay": _handle_replay,
+             "compare": _handle_compare}
 
 
 def main(argv=None) -> int:

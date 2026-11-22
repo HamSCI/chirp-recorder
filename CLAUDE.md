@@ -31,7 +31,11 @@ bash -n scripts/install.sh       # syntax check
 
 ## Architecture
 
-- `src/chirp_recorder/cli.py` holds the command line. Only `version` exists.
+- `src/chirp_recorder/cli.py` holds the command line. `replay` runs
+  codar_grab captures through the detector (`core/replay.py`); `compare`
+  gives the side-by-side verdict against codar-sounder from the sink
+  (`core/compare.py`). `tests/golden/README.md` says where the golden
+  captures live.
 - `src/chirp_recorder/_reporter_id.py` converts reporter-id spellings
   (`to_key`, `to_storage`, `systemd_instance`, `display`). It copies
   codar-sounder's module unchanged and goes when codar-sounder retires.

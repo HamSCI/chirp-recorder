@@ -193,3 +193,43 @@ def test_settings_without_a_position_are_refused(tmp_path, plan_and_txs, physics
         _stop(plan_and_txs, s, tmp_path)
     with pytest.raises(ConfigError, match="position_source"):
         _stop(plan_and_txs, {k: v for k, v in s.items() if k != "position_source"}, tmp_path)
+
+
+GOLDEN_TDMA_SAMPLES = 4_829    # 75.45 ms: 925.88 + 75.45 = 1001.33 ms, so 1.33 ms into the next sweep
+
+
+def test_parity_on_a_golden_capture(tmp_path, tx_block, ref_kw, plan_and_txs,
+                                    physics_settings, split_into_intervals):
+    """One real K3LR capture (Task 17) through codar-sounder's pipeline and
+    the stopgap: the same records.  The capture holds 30 s, so both sides run
+    a 30 s CPI.  Absent captures fail, naming tests/golden/README.md."""
+    import os
+
+    import numpy as np
+    golden = Path(os.environ.get("CHIRP_GOLDEN_DIR",
+                                 "/home/mjh/hamsci/tasks/chirp-registry/golden")) / "K3LR"
+    caps = sorted(golden.glob("*.npy"))
+    if not caps:
+        pytest.fail(f"no K3LR golden captures in {golden}; see tests/golden/README.md",
+                    pytrace=False)
+    import datetime as dt
+    x = np.load(caps[0])
+    assert x.size == 30 * 64_000
+    start = dt.datetime(2026, 11, 20, 0, 30, 1, tzinfo=dt.timezone.utc)
+    # The made-up TX1 has no real TDMA slot; this offset puts the capture's
+    # strongest arrival (x[0] + 925.88 ms) about 1.3 ms into the sweep, inside
+    # the 200-800 km window, so the pipelines have real arrivals to agree on.
+    tdma = GOLDEN_TDMA_SAMPLES
+    ref = _TransmitterPipeline(tx_config=dict(tx_block, tdma_offset_samples=tdma),
+                               output_dir=tmp_path / "ref", ch_writer=None, sigmondb_hook=None,
+                               **dict(ref_kw, coherent_seconds=30.0))
+    ref.process_cpi(x, start)
+    stop = _stop(plan_and_txs, dict(physics_settings, coherent_seconds=30,
+                                    tdma_offset_samples={"TX1": tdma}), tmp_path / "new")
+    for iv, lab in split_into_intervals(x, start):
+        stop.feed(iv, lab)
+    a, b = _records(tmp_path / "ref"), _records(tmp_path / "new")
+    assert a and len(a) == len(b)
+    drop = {"client"}
+    assert [{k: v for k, v in r.items() if k not in drop} for r in a] == \
+           [{k: v for k, v in r.items() if k not in drop} for r in b]
