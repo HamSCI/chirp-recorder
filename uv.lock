@@ -41,7 +41,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "codar-sounder"
-version = "0.7.0"
+version = "0.8.0"
 source = { editable = "../codar-sounder" }
 dependencies = [
     { name = "hamsci-dsp" },
