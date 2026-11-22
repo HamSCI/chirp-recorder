@@ -24,7 +24,7 @@ tau, with the Doppler removed (detect.py).  So each chirp-recorder row enters
 the comparison as delay_ns - doppler_hz / rate_hz_per_s, codar-sounder's
 quantity; a chirp-recorder row with no Doppler stays out.
 
-Match mode (provisional, 2026-11-22; Michael decides).  codar-sounder takes
+Match mode (Michael, 2026-11-22: "bin").  codar-sounder takes
 the integer range bin and refines nothing, so its delay moves in steps of
 one bin, 1 / (period * |rate|) = 38.9 us for the 4.463 MHz group.
   "bin"    (default) a pair matches when |chirp - codar| <= bin / 2 + tol_ns
@@ -360,7 +360,8 @@ def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float 
 
     `mean_offset` reports |mean(chirp - codar)| over the fine pairs inside
     their limit; it gates (and needs at least mean_offset_min_n of them, else
-    "insufficient") only when mean_offset=True.  Provisional: Michael decides.
+    "insufficient") only when mean_offset=True.  Michael (2026-11-22) chose
+    "bin" without this gate, so it reports by default.
     """
     if match not in MATCH_MODES:
         raise ValueError(f"match must be one of {MATCH_MODES}, not {match!r}")

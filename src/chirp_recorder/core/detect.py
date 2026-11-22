@@ -36,8 +36,10 @@ _CHUNK_SAMPLES = 400_000     # samples per block when the interval is re-compres
 RESIDUE_DB = 12.0       # an "m" residue this far under an arrival is CLEAN's own leftover
 # Slow-time coherence |sum v e^{-i phi_hat t}| / sum |v| under which the fitted
 # Doppler describes no single path (spread night sky wave: 0.03-0.25 on the
-# golden captures).  Provisional: Task 18 fix round 1 chose 0.5 from the
-# golden night's spread of values, which runs continuously from 0.06 to 1.
+# golden captures).  Task 18 fix round 1 chose 0.5 from the golden night's
+# spread of values, which runs continuously from 0.06 to 1.  Michael accepted
+# it on 2026-11-22, to be checked against the next golden night (one with
+# daytime ground-wave captures).
 DOPPLER_MIN_COHERENCE = 0.5
 # A Doppler-shifted arrival's raw peak sits g * (-f/k) from its Doppler-free
 # delay, with |g| <= 1 set by where the row split cuts the chirp.  So the
