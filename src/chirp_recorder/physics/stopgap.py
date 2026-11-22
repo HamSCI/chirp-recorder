@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 
 from chirp_recorder import __version__
-from chirp_recorder.config import ConfigError
+from chirp_recorder.config import PHYSICS_DEFAULTS, ConfigError
 from chirp_recorder.core.catalogue import Transmitter
 from chirp_recorder.core.channels import ChannelPlan
 from chirp_recorder.core.source import Interval
@@ -26,6 +26,9 @@ from chirp_recorder.core.timing import Label
 from chirp_recorder.physics.pipeline import TransmitterPipeline
 
 log = logging.getLogger(__name__)
+
+#: The physics output format, in processing_version ("+physics.N").
+PHYSICS_FORMAT = 2
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 #: Intervals count as contiguous within half an input sample.
@@ -81,7 +84,10 @@ class PhysicsStopgap:
             return
         lat, lon = settings["receiver_lat"], settings["receiver_lon"]
         offsets = settings.get("tdma_offset_samples") or {}
-        version = f"chirp-recorder/{__version__}"
+        # +physics.2: the energy-sum profile (snr_db on a new scale), the
+        # onset convention and the whole-sweep replica.  Earlier physics
+        # output carries no +physics marker.
+        version = f"chirp-recorder/{__version__}+physics.{PHYSICS_FORMAT}"
         self._pipes: list[tuple[TransmitterPipeline, float]] = []
         for g in plan.groups:
             for tx_id in g.tx_ids:
@@ -110,7 +116,8 @@ class PhysicsStopgap:
                     coherent_seconds=self.coherent_seconds,
                     range_min_km=float(settings.get("range_min_km", 200)),
                     range_max_km=float(settings.get("range_max_km", 800)),
-                    snr_threshold_db=float(settings.get("snr_threshold_db", 5.0)),
+                    snr_threshold_db=float(settings.get(
+                        "snr_threshold_db", PHYSICS_DEFAULTS["snr_threshold_db"])),
                     clutter_window=int(settings.get("clutter_window", 20)),
                     max_peaks_per_cpi=int(settings.get("max_peaks_per_cpi", 4)),
                     host_call=host_call, host_grid=host_grid,

@@ -13,6 +13,7 @@ per detected peak.
 Schema (v0.5):
     timestamp                        ISO-8601 UTC
     client                           "codar-sounder"
+    processing_version               chirp-recorder: "chirp-recorder/<ver>+physics.2"
     radiod_id, radiod_status_dns     identity
     station_id                       transmitter id (e.g. "DUCK")
     oblique_freq_hz, sweep_rate_hz_per_s, coherent_seconds   measurement context
@@ -135,6 +136,7 @@ class JsonlWriter:
         peak_index: int = 0,
         peak_count: int = 1,
         dechirp_sweeps_rejected: int = 0,
+        processing_version: Optional[str] = None,
     ) -> Path:
         """Write one record and return the path it landed in.
 
@@ -167,6 +169,8 @@ class JsonlWriter:
             "timestamp": timestamp.astimezone(timezone.utc).isoformat(),
             "timing_authority": timing_authority,
             "client": self.CLIENT,
+            **({"processing_version": processing_version}
+               if processing_version is not None else {}),
             "radiod_id": self.radiod_id,
             "radiod_status_dns": radiod_status_dns,
             "station_id": self.station_id,

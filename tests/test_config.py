@@ -178,7 +178,7 @@ def test_physics_defaults_and_settings_for_a_channel(tmp_path):
         "transmitters =", f"tdma_offset_samples = {{ {a.id} = 12 }}\ntransmitters ="))
     cfg = load_instance("AC0G-T7", tmp_path)
     assert cfg.physics == {"enabled": True, "coherent_seconds": 60, "range_min_km": 200,
-                           "range_max_km": 800, "snr_threshold_db": 5.0,
+                           "range_max_km": 800, "snr_threshold_db": 10.0,
                            "max_peaks_per_cpi": 4, "clutter_window": 20}
     s = physics_settings(cfg, cfg.channels[0])
     assert s["tdma_offset_samples"] == {a.id: 12} and s["interval_s"] == 30

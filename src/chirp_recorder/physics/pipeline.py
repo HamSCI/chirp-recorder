@@ -8,7 +8,8 @@ differences in plumbing:
     log one warning per CPI;
   - JSONL lands under <output_dir>/physics/<tx>/YYYY/MM/DD.jsonl, and the
     record's "client" names chirp-recorder.
-Four differences in behaviour (2026-11-22; docs/SWEEP-TIMING.md):
+Six differences in behaviour (2026-11-22; docs/SWEEP-TIMING.md), marked
+"+physics.2" in processing_version:
   - tdma_offset_samples names the phase of the transmitter's sweep onset
     after the UTC second; codar-sounder aimed its replica at -offset;
   - process_cpi places the replica from the CPI's own UTC label, not from
@@ -16,7 +17,10 @@ Four differences in behaviour (2026-11-22; docs/SWEEP-TIMING.md):
   - the replica models the whole sweep, onset at one band edge (see
     dechirp.make_replica), where codar-sounder's matched only half;
   - the range axis takes the sweep rate's sign, so an up-chirp reads
-    positive range.
+    positive range;
+  - range_profile sums energy across Doppler, so snr_db reads on a new
+    scale (default threshold 10 dB, not 5);
+  - coherent_seconds reports the sweeps dechirp used.
 """
 from __future__ import annotations
 
@@ -171,6 +175,9 @@ class TransmitterPipeline:
                      result.range_spectrum.shape[0])
 
         ts = cpi_start_utc
+        # The sweeps dechirp used: the row cut at the onset drops the CPI's
+        # first sweep unless the CPI opens on it (59 of 60).
+        used_s = result.range_spectrum.shape[0] / self.sweep_repetition_hz
         last_path: Optional[Path] = None
         peak_count = len(detections)
         for peak_index, detection in enumerate(detections):
@@ -201,13 +208,15 @@ class TransmitterPipeline:
                 timestamp=ts, fix=fix, detection=detection, scintillation=scint,
                 radiod_status_dns=self.radiod_status_dns,
                 oblique_freq_hz=self.center_freq_hz,
-                coherent_seconds=self.coherent_seconds,
+                coherent_seconds=used_s,
+                processing_version=self.processing_version,
                 sweep_rate_hz_per_s=self.sweep_rate_hz_per_s,
                 peak_index=peak_index, peak_count=peak_count,
                 dechirp_sweeps_rejected=result.n_sweeps_rejected,
             )
             rows.append(self._ch_row_for(
                 timestamp=ts, detection=detection, fix=fix, scintillation=scint,
+                coherent_seconds=used_s,
                 peak_index=peak_index, peak_count=peak_count,
                 dechirp_sweeps_rejected=result.n_sweeps_rejected))
             log.info(
@@ -224,6 +233,7 @@ class TransmitterPipeline:
 
     def _ch_row_for(self, *, timestamp, detection, fix, scintillation,
                     peak_index: int, peak_count: int,
+                    coherent_seconds: Optional[float] = None,
                     dechirp_sweeps_rejected: int = 0) -> dict:
         return build_spots_row(
             timestamp=timestamp, host_call=self.host_call,
@@ -232,7 +242,8 @@ class TransmitterPipeline:
             processing_version=self.processing_version,
             station_id=self.station_id, center_freq_hz=self.center_freq_hz,
             sweep_rate_hz_per_s=self.sweep_rate_hz_per_s,
-            coherent_seconds=self.coherent_seconds, detection=detection,
+            coherent_seconds=(self.coherent_seconds if coherent_seconds is None
+                              else coherent_seconds), detection=detection,
             fix=fix, scintillation=scintillation, peak_index=peak_index,
             peak_count=peak_count,
             dechirp_sweeps_rejected=dechirp_sweeps_rejected)

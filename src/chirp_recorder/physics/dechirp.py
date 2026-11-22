@@ -123,9 +123,9 @@ def make_replica(
             CODAR down-chirp has ``κ < 0``; up-chirps have ``κ > 0``.
         window: apply a Hann window to suppress FFT sidelobes.
         phase_offset_samples: the buffer sample at the replica's sweep
-            onset (its start frequency, one band edge), modulo ``n_samples``.  A transmitter whose sweep
-            starts at that sample dechirps to its path delay.  It may be
-            fractional.  Default 0.
+            onset (its start frequency, one band edge), modulo
+            ``n_samples``.  A transmitter whose sweep starts at that sample
+            dechirps to its path delay.  It may be fractional.  Default 0.
 
     The offset convention, one for the whole physics path: a configured
     ``tdma_offset_samples`` is the phase of the transmitter's sweep onset
@@ -319,8 +319,16 @@ def range_profile(result: DechirpResult) -> np.ndarray:
     For F-region detection we don't need Doppler resolution — the dominant
     energy at each range integrates across all Doppler bins.  Returns
     real-valued power in arbitrary units (consumer normalises if needed).
+
+    Energy, not magnitude (2026-11-22, physics.2).  By Parseval the energy
+    across Doppler equals the energy across sweeps, so a sweep the MAD
+    pre-filter zeroes removes only its own share.  codar-sounder summed
+    |range_doppler|: a zeroed sweep spread a steady tone across every
+    Doppler bin and lifted snr_db by about 3 dB.  snr_db on this scale reads
+    about twice the old dB figure; the default threshold moved from 5 to
+    10 dB to match (config.PHYSICS_DEFAULTS).
     """
-    return np.abs(result.range_doppler).sum(axis=0).astype(np.float32)
+    return (np.abs(result.range_doppler) ** 2).sum(axis=0).astype(np.float32)
 
 
 def positive_range_window(

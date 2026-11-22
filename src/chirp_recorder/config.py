@@ -106,8 +106,14 @@ def _number(v: Any, what: str, lo: float, hi: float, errs: list[str]) -> Optiona
     return v
 
 
+# snr_threshold_db: 10 dB on the energy-sum profile (physics.2) holds the
+# operating point codar-sounder's 5 dB held on its magnitude-sum profile.
+# On the golden captures' empty range bins (K3LR 16 + W2NAF 19 CPIs, 200-800
+# km), 10 dB passes 20 peaks where the old 5 dB passed 18; white noise passes
+# none at either (largest noise peak 2.05 dB).  tasks/chirp-registry/tdma-sign
+# r2-false-alarm*.txt.
 PHYSICS_DEFAULTS = {"enabled": True, "coherent_seconds": 60, "range_min_km": 200,
-                    "range_max_km": 800, "snr_threshold_db": 5.0,
+                    "range_max_km": 800, "snr_threshold_db": 10.0,
                     "max_peaks_per_cpi": 4, "clutter_window": 20}
 
 

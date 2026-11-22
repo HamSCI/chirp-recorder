@@ -43,15 +43,13 @@ def _plan(rate):
 
 @pytest.mark.parametrize("rate", [-25_733.913, 25_733.913])
 def test_a_path_reads_its_group_range_at_every_cpi_phase(
-        tmp_path, monkeypatch, physics_settings, split_into_intervals, rate):
+        tmp_path, physics_settings, split_into_intervals, rate):
     """A TX sweeping from the UTC second over a 420 km path reads 420 km
     whether the CPI opens 0, 0.25, 0.6 or 0.75 s after the second, and its
     SNR holds within 1 dB across those phases (a run's phase is arbitrary).
-    The per-sweep MAD pre-filter is off: on stationary synthetic input it
-    zeroes 0-3 clean sweeps per CPI, whatever the phase, and each zeroed
-    sweep lifts snr_db by about 1 dB (round 1 report, concern)."""
-    import chirp_recorder.physics.dechirp as dc
-    monkeypatch.setattr(dc, "SWEEP_MAD_REJECTION_K", float("inf"))
+    The per-sweep MAD pre-filter runs as shipped.  On stationary synthetic
+    input it zeroes 0-3 clean sweeps per CPI; under the magnitude-sum profile
+    each lifted snr_db by about 3 dB, under the energy sum by nothing."""
     from conftest import phys_cpi
     snrs = []
     for k, phase_s in enumerate((0.0, 0.25, 0.6, 0.75)):
@@ -66,6 +64,9 @@ def test_a_path_reads_its_group_range_at_every_cpi_phase(
         rec = _records(out)[0]
         assert rec["group_range_km"] == pytest.approx(420.0, abs=12.0)
         assert rec["client"] == "chirp-recorder"
+        assert rec["processing_version"] == f"chirp-recorder/{__version__}+physics.2"
+        # A CPI that does not open on the onset loses its first sweep to the row cut.
+        assert rec["coherent_seconds"] == (60.0 if phase_s == 0.0 else 59.0)
         snrs.append(rec["snr_db"])
     assert max(snrs) - min(snrs) < 1.0, snrs
     p = next((tmp_path / "p0").rglob("*.jsonl")).relative_to(tmp_path / "p0")
@@ -98,7 +99,10 @@ def test_spots_rows_read_the_path_and_name_chirp_recorder(
     assert new[0]["group_range_km"] == pytest.approx(420.0, abs=12.0)
     assert new[0]["station_id"] == "TX1"
     assert {r["producer"] for r in new} == {"chirp-recorder"}
-    assert {r["processing_version"] for r in new} == {f"chirp-recorder/{__version__}"}
+    # physics.2: the energy-sum profile (snr_db on a new scale) and the onset
+    # convention; earlier rows carry no +physics marker.
+    assert {r["processing_version"] for r in new} == {f"chirp-recorder/{__version__}+physics.2"}
+    assert {r["coherent_seconds"] for r in new} == {59.0}
 
 
 def test_a_gap_discards_the_partial_cpi(

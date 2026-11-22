@@ -734,13 +734,10 @@ class TestCpiPhase:
     the path reads 2 ms and its bin keeps its power within 1 dB."""
 
     @pytest.mark.parametrize("rate", [SWEEP_RATE_HZ_PER_S, -SWEEP_RATE_HZ_PER_S])
-    def test_path_bin_holds_across_cpi_phases(self, rate, monkeypatch):
-        # The per-sweep MAD pre-filter zeroes a clean sweep now and then on
-        # stationary synthetic input, and a zeroed sweep moves the
-        # |range-Doppler| sum by a few dB.  That has nothing to do with the
-        # CPI phase, so it is switched off here.
-        import chirp_recorder.physics.dechirp as dc
-        monkeypatch.setattr(dc, "SWEEP_MAD_REJECTION_K", float("inf"))
+    def test_path_bin_holds_across_cpi_phases(self, rate):
+        # The per-sweep MAD pre-filter stays on: it zeroes a clean sweep now
+        # and then on stationary synthetic input, and the energy-sum profile
+        # loses only that sweep's share.
         powers = []
         for phase_s in (0.0, 0.25, 0.6, 0.75):
             # the buffer opens phase_s after the second: the sweep started -phase_s ago
@@ -749,8 +746,40 @@ class TestCpiPhase:
             r = dechirp(rx, sample_rate_hz=SAMPLE_RATE_HZ, sweep_rate_hz_per_s=rate,
                         sweep_repetition_hz=SRF_HZ,
                         phase_offset_samples=(-phase_s * SAMPLE_RATE_HZ) % N_SAMPLES)
-            prof = np.abs(r.range_doppler).sum(axis=0)
+            prof = range_profile(r)
             i = int(np.argmax(prof))
             assert float(r.range_axis_km[i]) / C_KM_PER_S * 1e3 == pytest.approx(1.98, abs=0.01)
-            powers.append(10 * np.log10(prof[i] / r.range_doppler.shape[0]))
+            powers.append(10 * np.log10(prof[i] / np.median(prof)))
         assert max(powers) - min(powers) < 1.0, powers
+
+
+class TestEnergyProfile:
+    """range_profile sums energy across Doppler (Parseval: the energy across
+    Doppler equals the energy across sweeps), so a zeroed sweep removes only
+    its own share.  The magnitude sum it replaced rose about 3 dB per zeroed
+    sweep, because a notch spreads a steady tone across every Doppler bin."""
+
+    def test_zeroed_sweeps_leave_snr_within_a_tenth_of_a_db(self, monkeypatch):
+        from chirp_recorder.physics.trace import find_f_region_peaks
+        import chirp_recorder.physics.dechirp as dc
+        # Zero the sweeps by hand and keep the filter from zeroing others.
+        monkeypatch.setattr(dc, "SWEEP_MAD_REJECTION_K", float("inf"))
+        rng = np.random.default_rng(3)
+        m = 60
+        clean = _synth_chirp(m * N_SAMPLES, [420.0 / C_KM_PER_S], [10 ** (-10 / 20)],
+                             noise_db=-200.0)
+        noise = (rng.standard_normal(clean.size) + 1j * rng.standard_normal(clean.size)) / np.sqrt(2)
+        base = (clean + noise).astype(np.complex64)
+        snrs = []
+        for zeroed in (0, 1, 3):
+            x = base.copy()
+            for k in (10, 30, 50)[:zeroed]:
+                x[k * N_SAMPLES:(k + 1) * N_SAMPLES] = 0
+            r = dechirp(x, sample_rate_hz=SAMPLE_RATE_HZ, sweep_rate_hz_per_s=SWEEP_RATE_HZ_PER_S,
+                        sweep_repetition_hz=SRF_HZ)
+            ranges, prof = positive_range_window(r, range_profile(r))
+            top = find_f_region_peaks(prof, ranges, range_min_km=200.0, range_max_km=800.0,
+                                      snr_threshold_db=-1e9, max_peaks=1)
+            assert top[0].group_range_km == pytest.approx(420.0, abs=12.0)
+            snrs.append(top[0].snr_db)
+        assert max(snrs) - min(snrs) < 0.1, snrs
