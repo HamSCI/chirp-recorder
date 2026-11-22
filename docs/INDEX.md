@@ -11,4 +11,5 @@ Suite-wide front door: [HamSCI/sigmond docs](https://github.com/HamSCI/sigmond/b
 | Doc | Audience | What it gives you |
 |-----|----------|-------------------|
 | [../README.md](../README.md) ★ | all | what chirp-recorder is, install, configure, develop |
+| [SWEEP-TIMING.md](SWEEP-TIMING.md) ★ | developers, data users | why every delay and offset counts from the sweep's onset |
 | [../tests/golden/README.md](../tests/golden/README.md) | developers | where the golden captures live, and what their labels hold |

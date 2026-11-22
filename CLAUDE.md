@@ -78,3 +78,5 @@ sigmond converts each instance and then retires it.
 
 - Run Python in root-run scripts with `-I`. `tests/test_scripts_python_isolated.py` checks it.
 - Never write precise station coordinates into docs or tests.
+- Every sweep time counts from the sweep's onset at its start frequency, never the centre
+  crossing. `docs/SWEEP-TIMING.md` gives the rule and why.
