@@ -33,10 +33,9 @@ discrimination technique is needed.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
-
-from typing import Optional
 
 from .dechirp import C_KM_PER_S, make_replica, utc_phase_samples
 
@@ -198,14 +197,14 @@ def offset_for_tx(
 
     The cross-correlation peak position is the time-of-arrival of the
     TX's direct path within one period, counted from the scan buffer's
-    first sample: where the arriving sweep starts.  The TX started it
+    first sample: the arriving sweep's onset.  The TX started it
     earlier by the direct-path propagation delay (D / c); subtracting that
     gives the sample where the TX's sweep starts in that buffer, the value
     ``dechirp(phase_offset_samples=...)`` expects for the same buffer.
 
     With ``buffer_start_utc_ns`` (the UTC label of the buffer's first
-    sample) the result is the config value instead: the TX's sweep-start
-    phase after the UTC second, in samples at the channel rate (the
+    sample) the result is the config value instead: the phase of the TX's
+    sweep onset after the UTC second, in samples at the channel rate (the
     convention in ``dechirp.make_replica``).  That adds the buffer's own
     phase after the second.  The value then holds across runs, whatever
     phase a later CPI opens at.

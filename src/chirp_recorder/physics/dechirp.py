@@ -122,18 +122,19 @@ def make_replica(
         sweep_rate_hz_per_s: signed sweep rate (Hz/s).  Sign matters: a
             CODAR down-chirp has ``κ < 0``; up-chirps have ``κ > 0``.
         window: apply a Hann window to suppress FFT sidelobes.
-        phase_offset_samples: the buffer sample at which the replica's
-            sweep starts, modulo ``n_samples``.  A transmitter whose sweep
+        phase_offset_samples: the buffer sample at the replica's sweep
+            onset (its start frequency, one band edge), modulo ``n_samples``.  A transmitter whose sweep
             starts at that sample dechirps to its path delay.  It may be
             fractional.  Default 0.
 
     The offset convention, one for the whole physics path: a configured
-    ``tdma_offset_samples`` is the transmitter's sweep-start phase after
-    the UTC second, in samples at the channel rate, and the replica starts
-    there.  ``TransmitterPipeline`` passes this function the configured
+    ``tdma_offset_samples`` is the phase of the transmitter's sweep onset
+    after the UTC second, in samples at the channel rate, and the replica
+    starts there.  Every sweep time counts from the onset
+    (docs/SWEEP-TIMING.md).  ``TransmitterPipeline`` passes this function the configured
     phase less the CPI's own phase after the second
-    (:func:`utc_phase_samples`).  The sweep start is the one the sigmondb
-    rows count from.  codar-sounder's ``make_replica`` put its zero at
+    (:func:`utc_phase_samples`).  The sigmondb rows count from the same
+    onset.  codar-sounder's ``make_replica`` put its zero at
     ``-offset`` instead; the two agree only at 0 and ``n_samples/2``.
     """
     if n_samples <= 0:
@@ -193,8 +194,8 @@ def dechirp(
             unambiguous bandwidth.
         apply_window: pass a Hann window through to the replica
             generator.
-        phase_offset_samples: the buffer sample where this TX's sweep
-            starts (see ``make_replica``).  Selects which TX in a shared
+        phase_offset_samples: the buffer sample at this TX's sweep onset
+            (see ``make_replica``).  Selects which TX in a shared
             band to dechirp.  The rows start at the first whole sample at
             or after it, so a nonzero offset costs up to one sweep at the
             head of the CPI.  Default 0.

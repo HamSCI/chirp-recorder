@@ -1,18 +1,22 @@
 """One transmitter's dechirp -> trace -> invert -> write pipeline.
 
-Moved from codar-sounder's core/daemon.py (`_TransmitterPipeline`), otherwise unchanged
-in behaviour.  Three differences, all about plumbing:
+Moved from codar-sounder's core/daemon.py (`_TransmitterPipeline`).  Three
+differences in plumbing:
   - no sink writer and no sigmondb hook (the stopgap owns no sink; the rows
     come back to the caller, pre-flight C12);
   - dechirp and trace failures raise instead of logging, so the stopgap can
     log one warning per CPI;
   - JSONL lands under <output_dir>/physics/<tx>/YYYY/MM/DD.jsonl, and the
     record's "client" names chirp-recorder.
-Two differences in behaviour (2026-11-22): tdma_offset_samples names the
-transmitter's sweep start after the UTC second, and process_cpi places the
-replica from the CPI's own UTC label.  codar-sounder aimed the replica at
--offset from an unreferenced buffer start (see dechirp.make_replica).  And
-the range axis takes the sweep rate's sign, so an up-chirp reads positive range.
+Four differences in behaviour (2026-11-22; docs/SWEEP-TIMING.md):
+  - tdma_offset_samples names the phase of the transmitter's sweep onset
+    after the UTC second; codar-sounder aimed its replica at -offset;
+  - process_cpi places the replica from the CPI's own UTC label, not from
+    an unreferenced buffer start;
+  - the replica models the whole sweep, onset at one band edge (see
+    dechirp.make_replica), where codar-sounder's matched only half;
+  - the range axis takes the sweep rate's sign, so an up-chirp reads
+    positive range.
 """
 from __future__ import annotations
 
@@ -86,7 +90,7 @@ class TransmitterPipeline:
         self.sweep_rate_hz_per_s = float(tx_config["sweep_rate_hz_per_s"])
         self.sweep_bw_hz = float(tx_config["sweep_bw_hz"])
         self.sweep_repetition_hz = float(tx_config["sweep_repetition_hz"])
-        # The TX's sweep-start phase after the UTC second, in samples at the
+        # The phase of the TX's sweep onset after the UTC second, in samples at the
         # channel rate (the convention in dechirp.make_replica); process_cpi
         # turns it into this CPI's buffer offset.
         self.tdma_offset_samples = int(tx_config.get("tdma_offset_samples", 0))
@@ -117,9 +121,10 @@ class TransmitterPipeline:
             self.sweep_bw_hz, self.ground_distance_km, self.tdma_offset_samples)
 
     def replica_start_samples(self, cpi_start_ns: int) -> float:
-        """The CPI sample where this TX's sweep starts (make_replica's
-        phase_offset_samples): its configured sweep-start phase after the
-        UTC second, less the CPI's own phase after the second."""
+        """The CPI sample at this TX's sweep onset (make_replica's
+        phase_offset_samples): its configured onset phase after the UTC
+        second, less the CPI's own phase after the second.  Counts from the
+        onset (docs/SWEEP-TIMING.md)."""
         n = int(round(self.sample_rate_hz / self.sweep_repetition_hz))
         return (self.tdma_offset_samples
                 - utc_phase_samples(cpi_start_ns, self.sample_rate_hz, n)) % n

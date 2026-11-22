@@ -100,7 +100,7 @@ class PhysicsStopgap:
                        "sweep_bw_hz": tx.sweep_bw_hz,
                        "sweep_repetition_hz": 1.0 / tx.period_s,
                        "tx_lat_deg": tx.lat, "tx_lon_deg": tx.lon,
-                       # sweep-start phase after the UTC second (dechirp.make_replica)
+                       # onset phase after the UTC second (docs/SWEEP-TIMING.md)
                        "tdma_offset_samples": int(offsets.get(tx.id, 0))}
                 pipe = TransmitterPipeline(
                     receiver_lat=lat, receiver_lon=lon, radiod_id=radiod,
