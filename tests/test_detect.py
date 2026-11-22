@@ -378,17 +378,61 @@ def test_delay_sigma_carries_the_doppler_sigma_over_k(synth):
 
 def test_the_correction_is_clipped_to_the_physics_bound():
     """|g| <= 1: the peak of a Doppler-shifted arrival moves by at most |f/k|
-    from its Doppler-free delay, whatever the row split.  A correction past
-    that lands on another path; clip it and say so."""
+    from its Doppler-free delay, whatever the row split.  The bound runs from
+    tau0, the same isolated refine with no Doppler removed, so the estimators'
+    own gap cancels.  Past it the correction landed on another path: publish
+    tau0 (a delay an estimator measured), never tau0 +- bound, and say so."""
     from chirp_recorder.core.detect import _clip_correction
-    raw, f, P = 0.042, -0.223, 1.0
+    tau0, f, P = 0.042, -0.223, 1.0
     bound = abs(f / K_4463)                                   # 8.67 us
-    tau, clipped = _clip_correction(raw + 44.7e-6, raw, f, K_4463, P)
-    assert clipped and tau == pytest.approx(raw + bound, abs=1e-12)
-    tau, clipped = _clip_correction(raw - 3e-6, raw, f, K_4463, P)
-    assert not clipped and tau == pytest.approx(raw - 3e-6, abs=1e-12)
-    tau, clipped = _clip_correction(0.9999995 - 20e-6, 0.0000005, f, K_4463, P)  # across 0
-    assert clipped and tau == pytest.approx((0.0000005 - bound) % P, abs=1e-12)
+    assert _clip_correction(tau0 + 44.7e-6, tau0, f, K_4463, P) == (tau0, True)
+    tau, clipped = _clip_correction(tau0 - 3e-6, tau0, f, K_4463, P)
+    assert not clipped and tau == pytest.approx(tau0 - 3e-6, abs=1e-12)
+    assert _clip_correction(tau0 + bound + 0.5e-6, tau0, f, K_4463, P, margin_s=1e-6) \
+        == (tau0 + bound + 0.5e-6, False)
+    assert _clip_correction(0.9999995 - 20e-6, 0.0000005, f, K_4463, P) == (0.0000005, True)
+
+
+def test_the_clip_margin_is_three_stat_sigmas_plus_100_ns():
+    from chirp_recorder.core.detect import _clip_margin_s
+    assert _clip_margin_s(40.0) == pytest.approx(220e-9)
+    assert _clip_margin_s(1000.0) == pytest.approx(3.1e-6)
+
+
+def test_a_clipped_correction_publishes_tau0_and_keeps_its_doppler(synth, monkeypatch):
+    import chirp_recorder.core.detect as D
+    real = D._doppler_free_tau
+    monkeypatch.setattr(D, "_doppler_free_tau",
+                        lambda sw, wf, fs, tau, dop: (real(sw, wf, fs, tau, dop) + 50e-6) % 1.0)
+    x = synth(fs=64_000, arrivals=[(0.0429, 1.0)], seconds=30, doppler_hz=0.2)
+    (a,) = D.detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals
+    assert a.doppler_clipped is True and abs(a.doppler_hz - 0.2) < 0.02
+    assert a.tau_ns == a.tau_zero_doppler_ns
+    snr = 10 ** (a.level_db / 10)
+    stat = 1e9 * np.sqrt(3) / (np.pi * WF_4463.bandwidth_hz() * np.sqrt(2 * snr * 30))
+    # the published delay keeps g * f/k of coupling, |g| <= 1
+    assert a.delay_sigma_ns == pytest.approx(np.hypot(stat, abs(a.doppler_hz / K_4463) * 1e9))
+
+
+def test_a_gated_off_row_publishes_tau0_with_the_coupling_in_its_sigma():
+    """Below the coherence gate the delay keeps up to |f/k| of coupling, and
+    the incoherent fit still sizes f fairly: sigma = hypot(stat, |f_raw/k|).
+    The delay comes from the same isolated refine as every other row."""
+    x = _incoherent(WF_4463, 64_000, [(0.0429, 1.0, False)])
+    (a,) = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals
+    assert a.doppler_low_coherence and a.doppler_hz is None and a.doppler_raw_hz is not None
+    assert a.tau_ns == a.tau_zero_doppler_ns
+    snr = 10 ** (a.level_db / 10)
+    stat = 1e9 * np.sqrt(3) / (np.pi * WF_4463.bandwidth_hz() * np.sqrt(2 * snr * 30))
+    assert a.delay_sigma_ns == pytest.approx(np.hypot(stat, abs(a.doppler_raw_hz / K_4463) * 1e9))
+
+
+def test_every_row_carries_tau0(synth):
+    x = synth(fs=64_000, arrivals=[(0.0429, 1.0)], seconds=30, doppler_hz=0.2)
+    (a,) = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals
+    assert isinstance(a.tau_zero_doppler_ns, int)
+    # tau0 keeps the coupling the correction removes (g ~ 0.95 at this split)
+    assert abs(a.tau_zero_doppler_ns - a.tau_uncorrected_ns) < 500
 
 
 @pytest.mark.parametrize("sep", [6.3, 7.3, 9.3])

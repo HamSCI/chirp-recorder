@@ -215,3 +215,22 @@ def test_rowwriter_skips_spots_when_its_spots_writer_is_none(tmp_path):
     w.close()
     assert arr.rows and cap.rows
     assert w.stats["spots_skipped"] == 2 and w.stats["sink_failures"] == 0
+
+
+def test_rows_jsonl_keeps_30_days_by_the_rows_own_day(tmp_path):
+    """compare reads this copy, so it keeps a stated window: files more than
+    ROWS_KEEP_DAYS before the day being written go at that day's first write.
+    The day comes from the rows, never the host clock."""
+    from chirp_recorder.core.writer import ROWS_KEEP_DAYS
+    assert ROWS_KEEP_DAYS == 30
+    d = tmp_path / "rows"
+    d.mkdir()
+    for day in ("2026-10-19", "2026-10-20", "2026-11-18"):
+        (d / f"{day}.jsonl").write_text("{}\n")
+    (d / "notes.txt").write_text("kept\n")
+    w = RowWriter(output_dir=tmp_path, sink_writers=None, phase_store=None)
+    cap, arrs = _rows()                                   # rows dated 2026-11-19
+    w.put(cap, arrs, [])
+    w.close()
+    assert sorted(p.name for p in d.iterdir()) == [
+        "2026-10-20.jsonl", "2026-11-18.jsonl", "2026-11-19.jsonl", "notes.txt"]

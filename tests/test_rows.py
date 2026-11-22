@@ -114,3 +114,10 @@ def test_doppler_quality_travels_in_engineering(result, t6_label):
     assert row["doppler_hz"] is None
     assert (e["doppler_coherence"], e["doppler_sigma_hz"], e["doppler_low_coherence"],
             e["doppler_clipped"], e["doppler_raw_hz"]) == ("0.12", "0.011", "1", "0", "-0.223")
+
+
+def test_tau0_travels_in_engineering(result, t6_label):
+    from dataclasses import replace
+    a = replace(result.arrivals[0], tau_zero_doppler_ns=123_455_500)
+    _, (row,) = rows_for_group(replace(result, arrivals=[a]), label=t6_label, **CALL, **KW)
+    assert row["engineering"]["tau_zero_doppler_ns"] == "123455500"

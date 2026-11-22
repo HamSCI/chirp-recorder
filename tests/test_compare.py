@@ -16,21 +16,26 @@ SCATTER_NS = (-300, -180, -60, 60, 180, 300)       # six arrivals per delay, +-3
 
 
 K = -25_733.913
+HALF_SWEEP_NS = 500_000_000      # codar-sounder's replica: sweep start at the centre
 
 
 def rows(producer, delays, *, doppler_hz=0.1, s4=0.2, sigma_phi=0.05, t6=True):
     """Six T6 arrivals per true delay, one per capture, for one reporter and group G,
     each written in its producer's convention.  chirp-recorder's delay_ns holds
     the true delay (detect.py removes the Doppler); codar-sounder's holds
-    tau - f/k, because its beat tone sits at -k*tau + f (sigmondb.py:92-93)."""
+    tau - f/k, because its beat tone sits at -k*tau + f (sigmondb.py:92-93),
+    plus half a sweep, because its replica starts the sweep at the channel
+    centre rather than the band edge (round 2; test below)."""
     prov = sr.provenance("T6", "epoch-1") if t6 else sr.provenance(None)
     shift = round(-doppler_hz / K * 1e9) if (producer == "codar" and doppler_hz) else 0
+    if producer == "codar":
+        shift += HALF_SWEEP_NS
     out = []
     for d in delays:
         for i, s in enumerate(SCATTER_NS):
             out.append(sr.arrival_row(
                 time=f"2026-11-19T{1 + i:02d}:00:00Z", reporter_id=REPORTER, group_key=G,
-                centre_hz=4.463e6, rate_hz_per_s=K, delay_ns=d + s + shift,
+                centre_hz=4.463e6, rate_hz_per_s=K, delay_ns=(d + s + shift) % 10**9,
                 level_db=30.0, doppler_hz=doppler_hz, s4=s4, sigma_phi_rad=sigma_phi,
                 detector_version=f"{producer}/test", **prov))
     return out
@@ -83,12 +88,17 @@ def test_a_0_3_hz_pair_measured_correctly_on_both_sides_matches():
 
 
 def test_chirp_rows_without_a_doppler_stay_out_of_the_match():
+    """No Doppler, no C1 conversion: the row stays out of the fine tier.
+    Round 2 (R1-I4) puts it in the coarse tier, which covers but never matches."""
     chirp = rows("chirp", [4_120_000, 42_906_000, 50_939_000])
     for r in chirp[:6]:
         r["doppler_hz"] = None
-    v = compare(chirp, rows("codar", [4_120_000, 42_906_000, 50_939_000]),
-                rung_s={G: 19.973e-3})
-    assert [c.median_delay_ns for c in v.codar_unmatched] == [4_120_000 + round(-0.1 / K * 1e9)]
+    codar = rows("codar", [4_120_000, 42_906_000, 50_939_000])
+    one = compare(chirp, codar, rung_s={G: 19.973e-3}, coarse=False)
+    assert [c.median_delay_ns for c in one.codar_unmatched] == [4_120_000 + round(-0.1 / K * 1e9)]
+    two = compare(chirp, codar, rung_s={G: 19.973e-3})
+    assert two.codar_unmatched == [] and len(two.matched) == 2 and len(two.coarse) == 1
+    assert two.status == "insufficient"                 # two fine clusters, not three
 
 
 def test_codar_bin_comes_from_codar_sounders_own_range_axis():
@@ -179,8 +189,8 @@ def test_the_sink_reader_keeps_to_its_producer_reporter_and_window(tmp_path):
     get = lambda **kw: read_sink_rows(db, **{**dict(                      # noqa: E731
         producer="chirp-recorder", reporter_id="AC0G/B4",
         since_iso="2026-11-19T00:00:00Z", until_iso="2026-11-20T00:00:00Z"), **kw})
-    # codar rows hold tau - f/k: 9 ms + 3.886 us
-    assert {r["delay_ns"] // 1000 for r in get(producer="codar-sounder")} == {9003, 9004}
+    # codar rows hold tau - f/k + P/2: 509 ms + 3.886 us
+    assert {r["delay_ns"] // 1000 for r in get(producer="codar-sounder")} == {509003, 509004}
     assert get(reporter_id="AC0G/B1A") == []
     assert len(get(since_iso="2026-11-19T03:30:00Z")) == 3           # 04Z, 05Z, 06Z
     assert len(get(until_iso="2026-11-19T03:00:00Z")) == 2           # until is exclusive
@@ -361,3 +371,203 @@ def test_the_seeds_mid_atlantic_gate_gives_compare_its_rung_spacing():
                 rung_s=rung)
     assert v.status == "pass" and [why for _, why in v.explained] == ["rung +2 of 42.910 ms"]
     assert rung_spacings(groups_for([seed["BMLR"]])) == {}        # no gate, no rung
+
+
+# --- round 2: two tiers (R1-I3, R1-I4), mean offset, codar JSONL (R1-I5) -------
+def _flag(rs, **eng):
+    """Mark rows as detect.py leaves them uncorrected (gated off, ambiguous,
+    clipped); a gated-off row also loses its published Doppler."""
+    out = []
+    for r in rs:
+        e = dict(r["engineering"], **{k: "1" for k in eng})
+        r = dict(r, engineering=e)
+        if "doppler_low_coherence" in eng:
+            r["doppler_hz"] = None
+        out.append(r)
+    return out
+
+
+TRUE3 = [4_120_000, 42_906_000, 50_939_000]
+
+
+def test_an_ambiguous_row_is_never_converted_and_goes_to_the_coarse_tier():
+    """detect.py kept the Doppler of an ambiguous row but skipped the
+    correction, so the row already holds tau - g f/k.  Subtracting f/k again
+    would move it twice; it joins the coarse tier on its own delay."""
+    amb = _flag(rows("chirp", [60_000_000], doppler_hz=0.5), doppler_ambiguous=True)
+    v = compare(rows("chirp", TRUE3) + amb, rows("codar", TRUE3), rung_s={G: 0.02})
+    assert len(v.matched) == 3                       # the fine tier alone
+    assert [c.median_delay_ns for c in v.chirp_only] == [60_000_000]    # unconverted
+    clipped = _flag(rows("chirp", [60_000_000], doppler_hz=0.1), doppler_clipped=True)
+    v = compare(rows("chirp", TRUE3) + clipped, rows("codar", TRUE3), rung_s={G: 0.02})
+    assert [c.median_delay_ns for c in v.chirp_only] == [60_000_000]
+
+
+def _coarse_case(d_ns, **kw):
+    """Three fine pairs, plus a codar cluster at f = 0.15 Hz whose only
+    chirp-recorder partner sits d_ns away in the coarse tier (gated off)."""
+    codar_extra = rows("codar", [70_000_000], doppler_hz=0.15)
+    codar_delay = (codar_extra[0]["delay_ns"] - SCATTER_NS[0] - HALF_SWEEP_NS) % 10**9
+    coarse = _flag(rows("chirp", [codar_delay + d_ns], doppler_hz=0.15),
+                   doppler_low_coherence=True)
+    return compare(rows("chirp", TRUE3) + coarse, rows("codar", TRUE3) + codar_extra,
+                   rung_s={G: 0.02}, match="exact", **kw)
+
+
+def test_a_coarse_cluster_7_us_off_at_0_15_hz_covers_and_leaves_matched_alone():
+    v = _coarse_case(7_000)                     # limit 5 + 1.5 * 5.83 = 13.7 us
+    by = {r.name: r for r in v.rows}
+    assert v.status == "pass" and by["coverage"].value == 1.0
+    assert len(v.matched) == 3 and by["matched"].value <= 5_000
+    assert by["matched_coarse"].gating is False and by["matched_coarse"].passed is True
+    assert by["matched_coarse"].value == 7_000
+    assert math.isclose(by["matched_coarse"].limit, 5_000 + 1.5 * 0.15 / 25_733.913 * 1e9)
+    (row,) = v.to_dict()["matched_coarse"]
+    assert row[2] == 7_000 and row[4] == G
+
+
+def test_the_same_coarse_cluster_15_us_off_is_missed():
+    v = _coarse_case(15_000)
+    by = {r.name: r for r in v.rows}
+    assert by["coverage"].value == 0.75 and by["coverage"].passed is False
+    assert by["matched_coarse"].passed is False and v.status == "fail"
+
+
+def test_one_tier_leaves_the_coarse_cluster_uncovered():
+    v = _coarse_case(7_000, coarse=False)
+    assert {r.name: r for r in v.rows}["coverage"].value == 0.75
+    assert v.to_dict()["tiers"] == ["fine"]
+    assert _coarse_case(7_000).to_dict()["tiers"] == ["fine", "coarse"]
+
+
+def test_the_coarse_tier_never_feeds_matched_or_doppler():
+    """Only fine rows support the precision claim: a night of gated rows alone
+    is insufficient, however well it covers."""
+    gated = _flag(rows("chirp", TRUE3), doppler_low_coherence=True)
+    v = compare(gated, rows("codar", TRUE3), rung_s={G: 0.02})
+    assert v.status == "insufficient" and v.matched == []
+    assert {r.name: r for r in v.rows}["coverage"].value == 1.0
+
+
+def _twenty(offset_ns):
+    true = [1_000_000 + 2_000_000 * i for i in range(20)]
+    return rows("chirp", true), rows("codar", [d - offset_ns for d in true])
+
+
+def test_mean_offset_is_reported_and_gates_only_when_asked():
+    chirp, codar = _twenty(6_000)            # each pair inside bin/2 + 5 us; mean 6 us
+    v = compare(chirp, codar, rung_s={})
+    row = {r.name: r for r in v.rows}["mean_offset"]
+    assert v.status == "pass" and row.gating is False and row.passed is False
+    assert row.value == 6_000 and row.limit == 5_000
+    assert v.to_dict()["mean_offset"] == {"gating": False, "n": 20, "mean_ns": 6_000.0}
+    assert compare(chirp, codar, rung_s={}, mean_offset=True).status == "fail"
+    chirp, codar = _twenty(1_000)
+    assert compare(chirp, codar, rung_s={}, mean_offset=True).status == "pass"
+
+
+def test_mean_offset_needs_twenty_matched_clusters():
+    v = compare(rows("chirp", TRUE3), rows("codar", TRUE3), rung_s={G: 0.02}, mean_offset=True)
+    assert v.status == "insufficient"
+
+
+def _write_codar_arrivals(d, rs):
+    """codar-sounder's layout (bf3f360): <dir>/arrivals-YYYYMMDD.jsonl."""
+    d.mkdir(parents=True, exist_ok=True)
+    for r in rs:
+        with open(d / f"arrivals-{r['time'][:10].replace('-', '')}.jsonl", "a") as fh:
+            fh.write(json.dumps(r, separators=(",", ":")) + "\n")
+
+
+def test_codar_rows_read_from_daily_jsonl(tmp_path):
+    """codar-sounder's daily files (<dir>/arrivals-YYYYMMDD.jsonl, one
+    sink-insert row dict per line), read with the reporter and window rules."""
+    from chirp_recorder.core.compare import read_codar_jsonl_rows
+    d = tmp_path / "arrivals"
+    rs = rows("codar", [4_120_000])
+    _write_codar_arrivals(d, rs)
+    with open(d / "arrivals-20261119.jsonl", "a") as fh:
+        fh.write("not json\n")
+    (d / "2026-11-19.jsonl").write_text(json.dumps(rs[0]) + "\n")       # not its name: ignored
+    (d / "notes.txt").write_text("ignored\n")
+    window = dict(since_iso="2026-11-19T00:00:00Z", until_iso="2026-11-20T00:00:00Z")
+    assert read_codar_jsonl_rows(d, reporter_id=REPORTER, **window) == rs
+    assert read_codar_jsonl_rows(d, reporter_id="AC0G/B1A", **window) == []
+    assert len(read_codar_jsonl_rows(d, reporter_id=REPORTER, since_iso="2026-11-19T03:30:00Z",
+                                     until_iso="2026-11-20T00:00:00Z")) == 3
+
+
+def test_codar_rows_read_what_codar_sounders_emitter_writes(tmp_path):
+    """The fixture comes from codar-sounder's own Emitter (its _keep_arrivals),
+    so the reader meets the real file name and row format."""
+    import numpy as np
+    from datetime import datetime, timezone
+    from codar_sounder.core.dechirp import dechirp
+    from codar_sounder.core.sigmondb import Emitter
+    from hamsci_dsp.chirp.waveform import Waveform, gated
+    from chirp_recorder.core.compare import read_codar_jsonl_rows
+
+    class Sink:
+        def __init__(self):
+            self.rows = []
+
+        def insert(self, rs):
+            self.rows.extend(rs)
+
+    arr_w, cap_w = Sink(), Sink()
+    em = Emitter((arr_w, cap_w), reporter_id=REPORTER, detector_version="codar-ref",
+                 state_dir=tmp_path)
+    wf = Waveform(4.463e6, K, 1.0, None, 1945.6e-6, 0.5)
+    x = np.tile(gated(wf, 64_000, 0.0429), 8).astype(np.complex64)
+    res = dechirp(x, sample_rate_hz=64_000.0, sweep_rate_hz_per_s=K, sweep_repetition_hz=1.0)
+    n = em.emit(result=res, cpi_start_utc=datetime(2026, 11, 19, 5, 0, tzinfo=timezone.utc),
+                tdma_offset_samples=0, centre_hz=4.463e6, period_s=1.0, expected=["X"],
+                duration_s=8.0, anchor=None, radiod="r")
+    assert n > 0 and arr_w.rows
+    assert [p.name for p in (tmp_path / "arrivals").iterdir()] == ["arrivals-20261119.jsonl"]
+    got = read_codar_jsonl_rows(tmp_path / "arrivals", reporter_id=REPORTER,
+                                since_iso="2026-11-19T00:00:00Z",
+                                until_iso="2026-11-20T00:00:00Z")
+    assert got == json.loads(json.dumps(arr_w.rows))
+
+
+def test_compare_subcommand_reads_codar_rows_from_jsonl(tmp_path, monkeypatch, configured,
+                                                        run_cli_full):
+    _sink_with_both(tmp_path, rows("chirp", TRUE3), [], configured)
+    monkeypatch.setenv("HAMSCI_SINK_PATH", str(tmp_path / "absent.db"))   # no sink needed
+    d = tmp_path / "codar-rows"
+    _write_codar_arrivals(d, rows("codar", TRUE3))
+    rc, out, err = run_cli_full("compare", "--instance", "AC0G-B4", "--since",
+                                "2026-11-19T00:00:00Z", "--codar-rows", str(d), "--json")
+    doc = json.loads(out)
+    assert rc == 0, err
+    assert doc["status"] == "pass" and doc["sources"]["codar-sounder"] == str(d)
+
+
+
+def test_codar_rows_sit_half_a_sweep_from_chirp_recorders():
+    """codar-sounder's replica sweeps from the channel centre (f = k t from
+    t = 0, dechirp.make_replica); the transmitted chirp, as hamsci-dsp and
+    clean.py model it, sweeps through the centre at mid-sweep.  So its beat
+    reads tau + sweep/2: codar-sounder's delay_ns sits half a sweep (0.5 s at
+    4.463 MHz) from chirp-recorder's for the same path.  compare takes it
+    back off before anything else."""
+    import numpy as np
+    from datetime import datetime, timezone
+    from codar_sounder.core.dechirp import dechirp
+    from codar_sounder.core.sigmondb import rows_for_cpi
+    from hamsci_dsp.chirp.waveform import Waveform, gated
+    from chirp_recorder.core.compare import codar_bin_ns, from_codar_convention
+    wf = Waveform(4.463e6, K, 1.0, None, 1945.6e-6, 0.5)
+    for tau in (0.0429, 0.3, 0.7):
+        x = np.tile(gated(wf, 64_000, tau), 8).astype(np.complex64)
+        res = dechirp(x, sample_rate_hz=64_000.0, sweep_rate_hz_per_s=K, sweep_repetition_hz=1.0)
+        _, arrs = rows_for_cpi(result=res, cpi_start_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                               tdma_offset_samples=0, centre_hz=4.463e6, period_s=1.0,
+                               reporter_id="X", t_level="T6", expected=[],
+                               detector_version="v", duration_s=8)
+        raw = arrs[0]["delay_ns"]                         # its strongest peak
+        assert abs(((raw - round(tau * 1e9) - HALF_SWEEP_NS + 5 * 10**8) % 10**9) - 5 * 10**8) \
+            <= codar_bin_ns(K, 1.0) / 2
+        (back,) = from_codar_convention([arrs[0]])
+        assert abs(back["delay_ns"] - round(tau * 1e9)) <= codar_bin_ns(K, 1.0) / 2

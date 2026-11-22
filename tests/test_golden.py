@@ -176,26 +176,42 @@ def test_replay_matches_the_reference_within_2_us(st):
     assert worst <= TOL_NS
 
 
+# Clipped corrections allowed per station (round 2, R1-I1 / M-a).  One clips
+# on this night: W2NAF 11:30Z, f = +0.081 Hz, where the derotated refine moved
+# 14.1 us against a bound of 3.5 us (|f/k| 3.2 us + margin 0.37 us): a hop
+# to a neighbouring path, which the clip exists to stop.  A second is news.
+MAX_CLIPPED = 1
+
+
 @pytest.mark.parametrize("st", STATIONS)
 def test_published_delay_stays_inside_the_physics_bound(st):
-    """|delay_ns - tau_uncorrected| <= |f/k| + 1 us: a Doppler correction never
-    moves a delay further than the coupling it removes (Task 18 review, I1;
-    before the fix, W2NAF 09:00Z moved 44.7 us at f = -0.223 Hz)."""
-    worst, n_low, n_clip, n = -float("inf"), 0, 0, 0
+    """|delay_ns - tau0| <= |f/k| + 3 sigma + 100 ns, tau0 the same isolated
+    refine with no Doppler removed: a correction never moves a delay further
+    than the coupling it removes (Task 18 review, I1; before round 1, W2NAF
+    09:00Z moved 44.7 us at f = -0.223 Hz).  A correction past the bound
+    publishes tau0 and says doppler_clipped, which would hide a failure, so
+    the clipped rows count here and may not exceed MAX_CLIPPED."""
+    worst, n_low, n_clip, n, gap = -float("inf"), 0, 0, 0, []
     for r in _replayed(st):
         eng = r["engineering"]
         k = float(r["rate_hz_per_s"])
         f = r["doppler_hz"]
-        bound = abs((f or 0.0) / k) * 1e9 + 1_000
-        unc = (int(eng["label_utc_ns"]) + int(eng["tau_uncorrected_ns"])) % PERIOD_NS
-        moved = abs(_circ(int(r["delay_ns"]), unc))
+        label = int(eng["label_utc_ns"])
+        tau0 = (label + int(eng["tau_zero_doppler_ns"])) % PERIOD_NS
+        unc = (label + int(eng["tau_uncorrected_ns"])) % PERIOD_NS
+        bound = abs((f or 0.0) / k) * 1e9 + 3 * float(r["delay_sigma_ns"]) + 100
+        moved = abs(_circ(int(r["delay_ns"]), tau0))
         worst = max(worst, moved - bound)
+        gap.append(abs(_circ(tau0, unc)))
         n += 1
         n_low += eng["doppler_low_coherence"] == "1"
         n_clip += eng["doppler_clipped"] == "1"
         assert moved <= bound, (st, eng["capture"], moved, bound, f)
+    gap.sort()
     print(f"\n{st}: {n} arrivals, {n_low} with Doppler gated off (low coherence), "
-          f"{n_clip} clipped; tightest margin {-worst:.0f} ns")
+          f"{n_clip} clipped; tightest margin {-worst:.0f} ns; |tau0 - CLEAN| median "
+          f"{gap[len(gap) // 2]} ns, max {gap[-1]} ns")
+    assert n_clip <= MAX_CLIPPED, f"{st}: {n_clip} corrections clipped"
 
 
 def test_seed_groups_reproduce_the_reference():
@@ -248,3 +264,55 @@ def test_ground_wave_clusters_hold_their_delay_through_the_night():
         for c in ground:
             assert c.spread_ns <= TOL_NS, (
                 f"{st}: cluster {c.median_delay_ns} ns spreads {c.spread_ns} ns")
+
+
+# --- round 2: coverage with one tier and with two (R1-I4) --------------------
+def _codar_rows(st: str, labels: dict) -> list:
+    """codar-sounder's own arrival rows for each capture: its dechirp and its
+    sigmondb row builder (production defaults: 8 peaks, 10 dB), on the same
+    counter labels as chirp-recorder's rows, stamped T6 for the comparison."""
+    import numpy as np
+    from datetime import timezone
+    from codar_sounder.core.dechirp import dechirp
+    from codar_sounder.core.sigmondb import rows_for_cpi
+    out = []
+    for name, _, _ in _captures(_station_dir(st)):
+        if name not in labels:
+            continue
+        x = np.load(GOLDEN / st / name)
+        res = dechirp(x, sample_rate_hz=float(FS), sweep_rate_hz_per_s=-25_733.913,
+                      sweep_repetition_hz=1.0)
+        start = datetime.fromtimestamp(labels[name] // 1000 / 1e6, tz=timezone.utc)
+        _, arrs = rows_for_cpi(result=res, cpi_start_utc=start, tdma_offset_samples=0,
+                               centre_hz=CENTRE_HZ, period_s=1.0, reporter_id=st,
+                               t_level="T6", expected=[], detector_version="codar-ref",
+                               duration_s=len(x) / FS)
+        out.extend(arrs)
+    return out
+
+
+@pytest.mark.parametrize("st", STATIONS)
+def test_coverage_with_one_tier_and_with_two(st):
+    """chirp-recorder's replay against codar-sounder's own rows for the same
+    captures, both placed by radiod's counter (to the microsecond codar-sounder
+    keeps).  The fine tier alone leaves out every gated-off row; the coarse
+    tier brings them back for coverage only.  Two tiers never cover less."""
+    from chirp_recorder.core.compare import compare, rung_spacings
+    d = _station_dir(st)
+    labels = {k: v // 1000 * 1000 for k, v in
+              counter_labels(d, fs=FS, channel_centre_hz=CENTRE_HZ).items()}
+    chirp = [dict(r, u_epoch_ns=230.0, origin="t6_anchor")
+             for r in relabel_rows(_replayed(st), labels, source="counter")]
+    codar = _codar_rows(st, labels)
+    rung = rung_spacings(_seed_groups())
+    one = compare(chirp, codar, rung_s=rung, coarse=False)
+    two = compare(chirp, codar, rung_s=rung)
+    cov = lambda v: {r.name: r for r in v.rows}["coverage"].value            # noqa: E731
+    by = {r.name: r for r in two.rows}
+    print(f"\n{st}: codar-sounder {len(codar)} rows; one tier: coverage {cov(one):.2f} "
+          f"({len(one.matched)} fine pairs, {len(one.codar_unmatched)} missed, "
+          f"{len(one.explained)} explained), status {one.status}; two tiers: coverage "
+          f"{cov(two):.2f} (+{len(two.coarse)} coarse pairs, {len(two.codar_unmatched)} missed), "
+          f"matched worst {by['matched'].value} ns of {by['matched'].limit:.0f}, "
+          f"matched_coarse worst {by['matched_coarse'].value} ns, status {two.status}")
+    assert cov(two) >= cov(one)

@@ -62,7 +62,8 @@ def rows_for_group(result, *, label, reporter_id: str, radiod: str, channel: str
                          "doppler_sigma_hz": _s(a.doppler_sigma_hz),
                          "doppler_low_coherence": _s(bool(a.doppler_low_coherence)),
                          "doppler_clipped": _s(bool(a.doppler_clipped)),
-                         "doppler_raw_hz": _s(a.doppler_raw_hz)},
+                         "doppler_raw_hz": _s(a.doppler_raw_hz),
+                         "tau_zero_doppler_ns": _s(a.tau_zero_doppler_ns)},
             **prov))
 
     tx_ids = result.group.tx_ids

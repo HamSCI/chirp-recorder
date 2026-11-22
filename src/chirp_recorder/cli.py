@@ -222,8 +222,8 @@ def _handle_replay(args) -> int:
 
 def _handle_compare(args) -> int:
     from chirp_recorder.config import ConfigError, load_instance
-    from chirp_recorder.core.compare import (compare, read_jsonl_rows, read_sink_rows,
-                                             rung_spacings)
+    from chirp_recorder.core.compare import (compare, read_codar_jsonl_rows, read_jsonl_rows,
+                                             read_sink_rows, rung_spacings)
     _setup_logging(False)
     keys = _keys(args)
     if len(keys) != 1:
@@ -234,26 +234,31 @@ def _handle_compare(args) -> int:
     except ConfigError as exc:
         print(f"chirp-recorder: {exc}", file=sys.stderr)
         return 2
-    from hs_uploader.sink.writer import sink_path
-    db = sink_path()
-    if not db or not Path(db).exists():
-        print(f"chirp-recorder: no sink to read ({db or 'no sink path set'})", file=sys.stderr)
-        return 2
     window = dict(reporter_id=cfg.reporter_id, since_iso=args.since, until_iso=args.until)
-    # chirp-recorder: its own daily JSONL, which nothing drains.  codar-sounder
-    # keeps no copy of its arrival rows (only the 7-day phase store, without
-    # Doppler), so its side comes from the sink queue, which its upload
-    # pipeline empties after each send: a window behind the last upload reads
-    # short, and the verdict then says "insufficient".
+    # chirp-recorder: its own daily JSONL, which nothing drains.
     rows_dir = Path(cfg.output_dir) / "rows"
     chirp = read_jsonl_rows(rows_dir, **window)
-    codar = read_sink_rows(Path(db), producer="codar-sounder", **window)
-    sources = {"chirp-recorder": str(rows_dir),
-               "codar-sounder": f"{db} pending_uploads (drained after each upload)"}
+    if args.codar_rows:
+        # codar-sounder's own daily JSONL (format: compare.read_codar_jsonl_rows)
+        codar = read_codar_jsonl_rows(Path(args.codar_rows), **window)
+        codar_src = str(args.codar_rows)
+    else:
+        # The sink queue, which codar-sounder's upload pipeline empties after
+        # each send: a window behind the last upload reads short, and the
+        # verdict then says "insufficient".
+        from hs_uploader.sink.writer import sink_path
+        db = sink_path()
+        if not db or not Path(db).exists():
+            print(f"chirp-recorder: no sink to read ({db or 'no sink path set'}); "
+                  "pass --codar-rows DIR for codar-sounder's JSONL", file=sys.stderr)
+            return 2
+        codar = read_sink_rows(Path(db), producer="codar-sounder", **window)
+        codar_src = f"{db} pending_uploads (drained after each upload)"
+    sources = {"chirp-recorder": str(rows_dir), "codar-sounder": codar_src}
     # A rung spacing is known only where the group's gate period is (the seed
     # gives the Mid-Atlantic 4.463 MHz group's).
     rung_s = rung_spacings([g for ch in cfg.channels for g in ch.groups])
-    v = compare(chirp, codar, rung_s=rung_s, match=args.match)
+    v = compare(chirp, codar, rung_s=rung_s, match=args.match, mean_offset=args.mean_offset)
     if args.json:
         print(json.dumps({**v.to_dict(), "sources": sources}, indent=2))
     else:
@@ -327,6 +332,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--match", choices=("bin", "exact"), default="bin",
                    help="bin (default): within half a codar-sounder range bin + 5 us; "
                         "exact: within 5 us")
+    p.add_argument("--codar-rows", metavar="DIR",
+                   help="codar-sounder's daily arrival JSONL (arrivals-YYYYMMDD.jsonl, "
+                        "e.g. /var/lib/codar-sounder/arrivals); default: the sink queue")
+    p.add_argument("--mean-offset", action="store_true",
+                   help="Gate on |mean(chirp - codar)| <= 5 us over >= 20 matched clusters")
     p.add_argument("--json", action="store_true")
     return parser
 

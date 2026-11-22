@@ -13,6 +13,10 @@ rows of decision 3 (2026-11-19):
                      within 0.02 Hz (about one codar-sounder bin)
   s4, sigma_phi      reported only: median |difference| (and *_max, largest)
 
+Half a sweep.  codar-sounder's replica starts its sweep at the channel
+centre, a half sweep from where the transmitted chirp starts, so its delay
+reads tau + sweep/2 (from_codar_convention takes that back off first).
+
 One convention.  codar-sounder's delay holds tau - f/k: its stretch
 processing puts each path's beat tone at -k*tau + f, and it reads tau as
 -f_beat/k (codar-sounder sigmondb.py:91-93).  chirp-recorder's delay_ns holds
@@ -96,6 +100,35 @@ def rung_spacings(groups) -> dict[str, float]:
             for g in groups if g.waveform.gate_period_s}
 
 
+def sweep_of(group_key: str) -> float:
+    """The sweep duration a group key names ("sweepXs"; the period if none)."""
+    for tok in str(group_key).split()[2:]:
+        if tok.startswith("sweep") and tok.endswith("s"):
+            try:
+                return float(tok[5:-1])
+            except ValueError:
+                pass
+    return period_of(group_key)
+
+
+def from_codar_convention(rows: list[dict]) -> list[dict]:
+    """codar-sounder rows moved half a sweep back, onto chirp-recorder's sweep start.
+
+    codar-sounder's replica sweeps from the channel centre, f = k t from t = 0
+    (codar-sounder dechirp.make_replica); the transmitted chirp sweeps through
+    the centre at mid-sweep (hamsci-dsp's waveform, codar-mf/clean.py).  So
+    codar-sounder's beat reads tau + sweep/2, and its delay_ns sits half a
+    sweep (0.5 s at 4.463 MHz) from chirp-recorder's for the same path (Task
+    18 round 2, measured on codar-sounder's own rows_for_cpi)."""
+    out = []
+    for r in rows:
+        gk = r.get("group_key", "")
+        p_ns = round(period_of(gk) * 1e9)
+        half = round(sweep_of(gk) * 1e9 / 2)
+        out.append(dict(r, delay_ns=(int(r["delay_ns"]) - half) % p_ns))
+    return out
+
+
 def to_codar_convention(rows: list[dict]) -> list[dict]:
     """chirp-recorder rows as codar-sounder measures them: delay_ns - f/k,
     folded into the sweep period.  Rows without a Doppler or a rate drop out."""
@@ -133,6 +166,9 @@ class Verdict:
     status: str             # "pass" | "fail" | "insufficient"
     match: str = "bin"      # the match mode the verdict used
     codar_bin_ns: dict = field(default_factory=dict)   # group_key -> codar range bin
+    coarse: list = field(default_factory=list)   # [(chirp coarse Cluster, codar Cluster, diff_ns, limit_ns)]
+    tiers: tuple = ("fine", "coarse")
+    mean_offset: dict = field(default_factory=dict)   # {"gating", "n", "mean_ns"}
 
     def to_dict(self) -> dict:
         return {
@@ -144,6 +180,10 @@ class Verdict:
             "matched": [[a.median_delay_ns, b.median_delay_ns, d, a.group_key]
                         for a, b, d in self.matched],
             "explained": [[c.median_delay_ns, why] for c, why in self.explained],
+            "matched_coarse": [[a.median_delay_ns, b.median_delay_ns, d, lim, a.group_key]
+                               for a, b, d, lim in self.coarse],
+            "tiers": list(self.tiers),
+            "mean_offset": {k: _num(v) for k, v in self.mean_offset.items()},
             "codar_unmatched": [c.median_delay_ns for c in self.codar_unmatched],
             "chirp_only": [c.median_delay_ns for c in self.chirp_only],
         }
@@ -243,13 +283,45 @@ def _explain(c: Cluster, parents: list[Cluster], rung_s: dict) -> Optional[str]:
     return None
 
 
+def is_fine(row: dict) -> bool:
+    """True for a row whose published delay detect.py corrected: it carries a
+    Doppler, and no flag says the correction was skipped (ambiguous), gated
+    off (low coherence) or clipped.  Only such a row converts by C1."""
+    if not _is_set(row.get("doppler_hz")):
+        return False
+    eng = row.get("engineering") or {}
+    return not any(str(eng.get(k, "")) in ("1", "True", "true")
+                   for k in ("doppler_ambiguous", "doppler_low_coherence", "doppler_clipped"))
+
+
 def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float = 0.9,
             min_matched: int = 3, doppler_tol_hz: float = 0.02,
-            rung_s: dict[str, float], match: str = "bin") -> Verdict:
+            rung_s: dict[str, float], match: str = "bin", coarse: bool = True,
+            mean_offset: bool = False, mean_offset_ns: int = 5_000,
+            mean_offset_min_n: int = 20) -> Verdict:
+    """Decision 3's verdict, in two tiers.
+
+    Fine tier: chirp-recorder rows with a usable Doppler (is_fine), converted
+    to codar-sounder's tau - f/k.  It alone feeds `matched` and `doppler`.
+    Coarse tier (coarse=True): every other T6 row, on its own uncorrected
+    delay.  Such a row holds tau - g f/k with g in [-0.5, 1] (Task 18 review,
+    R1-I4), so against codar-sounder's tau - f/k it differs by (1 - g) f/k: a
+    coarse cluster covers a codar cluster when |d| <= limit + 1.5 |f/k|, f the
+    codar cluster's median Doppler.  `coverage` counts both tiers;
+    `matched_coarse` reports the coarse pairs and gates nothing.
+
+    `mean_offset` reports |mean(chirp - codar)| over the fine pairs inside
+    their limit; it gates (and needs at least mean_offset_min_n of them, else
+    "insufficient") only when mean_offset=True.  Provisional: Michael decides.
+    """
     if match not in MATCH_MODES:
         raise ValueError(f"match must be one of {MATCH_MODES}, not {match!r}")
-    chirp = clusters(to_codar_convention(list(chirp_rows)), producer="chirp-recorder")
-    codar = clusters(list(codar_rows), producer="codar-sounder")
+    rows_in = list(chirp_rows)
+    chirp = clusters(to_codar_convention([r for r in rows_in if is_fine(r)]),
+                     producer="chirp-recorder")
+    chirp_c = clusters([r for r in rows_in if not is_fine(r)], producer="chirp-recorder") \
+        if coarse else []
+    codar = clusters(from_codar_convention(list(codar_rows)), producer="codar-sounder")
 
     def bin_ns(c: Cluster) -> float:
         return codar_bin_ns(c.rate_hz_per_s, c.period_s) if c.rate_hz_per_s else math.nan
@@ -260,18 +332,29 @@ def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float 
         b = bin_ns(c)
         return b / 2 + tol_ns if not math.isnan(b) else float(tol_ns)
 
+    def coarse_limit_ns(c: Cluster) -> float:
+        f = c.median_doppler_hz or 0.0
+        k = c.rate_hz_per_s
+        return limit_ns(c) + (1.5 * abs(f / k) * 1e9 if k else 0.0)
+
     pairs, paired_codar, paired_chirp = _pair(
         chirp, codar, lambda c: max(PAIR_WINDOW_NS, limit_ns(c)))
     pairs.sort(key=lambda p: (p[1].group_key, p[1].median_delay_ns))
+    rest = [i for i in range(len(codar)) if i not in paired_codar]
+    cpairs, cpaired_rest, paired_chirp_c = _pair(
+        chirp_c, [codar[i] for i in rest], lambda c: max(PAIR_WINDOW_NS, coarse_limit_ns(c)))
+    cpairs = sorted(((a, b, d, coarse_limit_ns(b)) for a, b, d in cpairs),
+                    key=lambda p: (p[1].group_key, p[1].median_delay_ns))
+    paired_any = set(paired_codar) | {rest[i] for i in cpaired_rest}
 
     # Strongest first; at equal strength a paired cluster comes first, then the
     # more often seen, then the earlier.  Only a cluster earlier in this order
     # explains a later one, so two equal clusters never explain each other.
     order = sorted(range(len(codar)), key=lambda i: (
-        -_strength(codar[i]), i not in paired_codar, -codar[i].n, codar[i].median_delay_ns))
+        -_strength(codar[i]), i not in paired_any, -codar[i].n, codar[i].median_delay_ns))
     explained, unmatched = [], []
     for k, i in enumerate(order):
-        if i in paired_codar:
+        if i in paired_any:
             continue
         why = _explain(codar[i], [codar[j] for j in order[:k]], rung_s)
         if why:
@@ -279,9 +362,12 @@ def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float 
         else:
             unmatched.append(codar[i])
     unmatched.sort(key=lambda c: (c.group_key, c.median_delay_ns))
-    chirp_only = [c for j, c in enumerate(chirp) if j not in paired_chirp]
+    chirp_only = sorted([c for j, c in enumerate(chirp) if j not in paired_chirp]
+                        + [c for j, c in enumerate(chirp_c) if j not in paired_chirp_c],
+                        key=lambda c: (c.group_key, c.median_delay_ns))
 
     within = [p for p in pairs if abs(p[2]) <= limit_ns(p[1])]
+    cwithin = [p for p in cpairs if abs(p[2]) <= p[3]]
     worst = float(max((abs(p[2]) for p in pairs), default=math.nan))
     # One group gives one limit; across groups the row shows the largest and
     # every pair still meets its own.
@@ -290,9 +376,13 @@ def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float 
     rows = [VerdictRow("matched", worst, float(lim), True,
                        len(pairs) >= min_matched and len(within) == len(pairs))]
     unexplained = len(codar) - len(explained)
-    cov = len(within) / unexplained if unexplained else math.nan
+    cov = (len(within) + len(cwithin)) / unexplained if unexplained else math.nan
     rows.append(VerdictRow("coverage", cov, min_fraction, True,
                            bool(unexplained) and cov >= min_fraction))
+    rows.append(VerdictRow(
+        "matched_coarse", float(max((abs(p[2]) for p in cpairs), default=math.nan)),
+        float(max((p[3] for p in cpairs), default=math.nan)), False,
+        len(cwithin) == len(cpairs)))
     dop = [(a.median_doppler_hz, b.median_doppler_hz) for a, b, _ in pairs
            if a.median_doppler_hz is not None and b.median_doppler_hz is not None]
     agree = (sum(abs(x - y) <= doppler_tol_hz + 1e-12 for x, y in dop) / len(dop)
@@ -305,15 +395,22 @@ def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float 
         big = float(max(diffs)) if diffs else math.nan
         rows.append(VerdictRow(name, med, math.nan, False, True))
         rows.append(VerdictRow(f"{name}_max", big, math.nan, False, True))
+    ds = [p[2] for p in within]
+    mean = float(statistics.fmean(ds)) if ds else math.nan
+    rows.append(VerdictRow("mean_offset", abs(mean), float(mean_offset_ns), bool(mean_offset),
+                           len(ds) >= mean_offset_min_n and abs(mean) <= mean_offset_ns))
 
-    if len(chirp) < min_matched or len(codar) < min_matched or not dop:
-        status = "insufficient"         # too few clusters, or no Doppler to judge
+    if (len(chirp) < min_matched or len(codar) < min_matched or not dop
+            or (mean_offset and len(ds) < mean_offset_min_n)):
+        status = "insufficient"   # too few fine clusters, no Doppler, or too few for the mean
     else:
         status = "pass" if all(r.passed for r in rows if r.gating) else "fail"
     bins = {c.group_key: bin_ns(c) for c in codar if c.rate_hz_per_s}
     return Verdict(matched=pairs, codar_unmatched=unmatched, explained=explained,
                    chirp_only=chirp_only, rows=rows, status=status, match=match,
-                   codar_bin_ns=bins)
+                   codar_bin_ns=bins, coarse=cpairs,
+                   tiers=("fine", "coarse") if coarse else ("fine",),
+                   mean_offset={"gating": bool(mean_offset), "n": len(ds), "mean_ns": mean})
 
 
 def read_sink_rows(db: Path, *, producer: str, reporter_id: str, since_iso: str,
@@ -335,7 +432,8 @@ def read_sink_rows(db: Path, *, producer: str, reporter_id: str, since_iso: str,
 
 
 def read_jsonl_rows(rows_dir: Path, *, reporter_id: str, since_iso: str,
-                    until_iso: str) -> list[dict]:
+                    until_iso: str, require_table: bool = True,
+                    pattern: str = "????-??-??.jsonl", day_of=lambda stem: stem) -> list[dict]:
     """Arrival rows from chirp-recorder's own daily JSONL (<output_dir>/rows/
     YYYY-MM-DD.jsonl), for one reporter, since <= time < until.
 
@@ -345,17 +443,41 @@ def read_jsonl_rows(rows_dir: Path, *, reporter_id: str, since_iso: str,
     if not d.is_dir():
         return []
     out = []
-    for f in sorted(d.glob("????-??-??.jsonl")):
-        if not (since_iso[:10] <= f.stem <= until_iso[:10]):
+    for f in sorted(d.glob(pattern)):
+        if not (since_iso[:10] <= day_of(f.stem) <= until_iso[:10]):
             continue
         for line in f.read_text().splitlines():
             try:
                 r = json.loads(line)
             except ValueError:
                 continue
-            if (r.get("table") != "arrival" or r.get("reporter_id") != reporter_id
+            if not isinstance(r, dict):
+                continue
+            table = r.get("table", None if not require_table else "")
+            if (table not in ("arrival", None) or (require_table and table != "arrival")
+                    or r.get("reporter_id") != reporter_id
                     or not (since_iso <= str(r.get("time", "")) < until_iso)):
                 continue
             r.pop("table", None)
             out.append(r)
     return out
+
+
+def read_codar_jsonl_rows(rows_dir: Path, *, reporter_id: str, since_iso: str,
+                          until_iso: str) -> list[dict]:
+    """codar-sounder's arrival rows from its daily JSONL, for one reporter,
+    since <= time < until.
+
+    Format (codar-sounder bf3f360, Emitter._keep_arrivals): files
+    <rows_dir>/arrivals-YYYYMMDD.jsonl, by default /var/lib/codar-sounder/
+    arrivals/, named for the UTC day of each row's time and kept 30 days.
+    One JSON object per line: the very row dict codar-sounder hands the sink
+    writer for sigmondb.arrival (hamsci_dsp.sigmondb_rows.ARRIVAL_COLUMNS:
+    time, reporter_id, group_key, rate_hz_per_s, delay_ns, doppler_hz, s4,
+    sigma_phi_rad, u_epoch_ns, ...), with no wrapper keys.  Its delay_ns keeps
+    codar-sounder's convention (tau - f/k + sweep/2); compare converts.  Lines
+    that do not parse are skipped; other files are ignored."""
+    return read_jsonl_rows(rows_dir, reporter_id=reporter_id, since_iso=since_iso,
+                           until_iso=until_iso, require_table=False,
+                           pattern="arrivals-????????.jsonl",
+                           day_of=lambda stem: f"{stem[9:13]}-{stem[13:15]}-{stem[15:17]}")

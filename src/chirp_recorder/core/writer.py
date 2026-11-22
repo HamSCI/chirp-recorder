@@ -25,6 +25,7 @@ from chirp_recorder.physics.spots import make_spots_writer
 log = logging.getLogger(__name__)
 
 PHASE_KEEP_DAYS = 7
+ROWS_KEEP_DAYS = 30      # rows/ JSONL: compare's window for chirp-recorder (Task 18)
 QUEUE_MAX = 256
 _STOP = object()
 
@@ -137,6 +138,7 @@ class RowWriter(threading.Thread):
         self._closed = False
         self._jsonl_lock = threading.Lock()
         self._jsonl_ok = True
+        self._rows_pruned_for: Optional[str] = None
         self.start()
 
     @property
@@ -226,6 +228,9 @@ class RowWriter(threading.Thread):
                 self._bump("jsonl_failures")
                 self._jsonl_state(False, exc)
         with self._jsonl_lock:
+            for day in sorted(by_day):
+                if self._rows_pruned_for is None or day > self._rows_pruned_for:
+                    self._prune_rows(day)
             for day, lines in by_day.items():
                 try:
                     d = self.output_dir / "rows"
@@ -240,6 +245,21 @@ class RowWriter(threading.Thread):
                     self._jsonl_state(False, exc)
         if ok:
             self._jsonl_state(True, None)
+
+    def _prune_rows(self, day: str) -> None:
+        """Drop rows/YYYY-MM-DD.jsonl more than ROWS_KEEP_DAYS before ``day``,
+        the UTC day of the rows being written (never the host clock)."""
+        self._rows_pruned_for = day
+        try:
+            cutoff = (date.fromisoformat(day) - timedelta(days=ROWS_KEEP_DAYS)).isoformat()
+        except ValueError:
+            return
+        for f in (self.output_dir / "rows").glob("????-??-??.jsonl"):
+            if f.stem < cutoff:
+                try:
+                    f.unlink()
+                except OSError as exc:
+                    log.warning("rows JSONL prune of %s failed: %s", f.name, exc)
 
     def _jsonl_state(self, ok: bool, exc) -> None:
         """Log on a change of state, not on every failure."""
