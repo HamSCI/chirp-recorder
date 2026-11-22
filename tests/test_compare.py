@@ -23,9 +23,11 @@ def rows(producer, delays, *, doppler_hz=0.1, s4=0.2, sigma_phi=0.05, t6=True):
     """Six T6 arrivals per true delay, one per capture, for one reporter and group G,
     each written in its producer's convention.  chirp-recorder's delay_ns holds
     the true delay (detect.py removes the Doppler); codar-sounder's holds
-    tau - f/k, because its beat tone sits at -k*tau + f (sigmondb.py:92-93),
-    plus half a sweep, because its replica starts the sweep at the channel
-    centre rather than the band edge (round 2; test below)."""
+    tau - f/k, because its beat tone sits at -k*tau + f (sigmondb.rows_for_cpi),
+    plus half a sweep as releases before 0.8.0 wrote it: their replica starts
+    the sweep at the channel centre rather than the band edge (round 2; test
+    below).  The detector_version "codar/test" names no codar-sounder release,
+    so compare corrects these rows as it does 0.7.0 ones."""
     prov = sr.provenance("T6", "epoch-1") if t6 else sr.provenance(None)
     shift = round(-doppler_hz / K * 1e9) if (producer == "codar" and doppler_hz) else 0
     if producer == "codar":
@@ -547,7 +549,7 @@ def test_compare_subcommand_reads_codar_rows_from_jsonl(tmp_path, monkeypatch, c
 
 
 
-def test_codar_rows_sit_half_a_sweep_from_chirp_recorders():
+def test_codar_rows_land_on_the_sweep_start_and_old_rows_get_corrected():
     """codar-sounder's replica sweeps from the channel centre (f = k t from
     t = 0, dechirp.make_replica); the transmitted chirp, as hamsci-dsp and
     clean.py model it, sweeps through the centre at mid-sweep.  So its beat
@@ -597,6 +599,23 @@ def test_the_half_sweep_correction_stops_at_the_fixed_codar_sounder_version(monk
     monkeypatch.setattr(C, "CODAR_HALF_SWEEP_FIXED_FROM", None)
     assert [r["delay_ns"] for r in from_codar_convention([old, new, later, odd])] \
         == [4_120_000] * 4
+
+
+def test_a_suffixed_codar_sounder_version_still_counts_as_fixed():
+    """A local or dev build (0.8.0+g1234, 0.8.1.dev3, 0.9.0rc1) parses on its
+    leading X.Y.Z, so compare never takes the half sweep off its rows twice."""
+    from chirp_recorder.core.compare import _version, from_codar_convention
+    assert _version("codar-sounder/0.8.0+g1234") == (0, 8, 0)
+    assert _version("codar-sounder/0.8.1.dev3") == (0, 8, 1)
+    assert _version("codar-sounder/0.9.0rc1") == (0, 9, 0)
+    assert _version("codar-sounder/0.7.0+local") == (0, 7, 0)
+    assert _version("codar-sounder/garbage") is None
+    assert _version("other/0.8.0") is None
+    row = dict(rows("codar", [4_120_000], doppler_hz=0.0)[0], delay_ns=504_120_000)
+    vers = ["codar-sounder/0.8.0+g1234", "codar-sounder/0.8.1.dev3", "codar-sounder/0.7.0+local"]
+    got = [r["delay_ns"] for r in from_codar_convention(
+        [dict(row, detector_version=v) for v in vers])]
+    assert got == [504_120_000, 504_120_000, 4_120_000]
 
 
 # --- round 3: the readers run as root on files another account can write ----

@@ -20,7 +20,7 @@ that back off first).  codar-sounder 0.8.0 writes it from the sweep start.
 
 One convention.  codar-sounder's delay holds tau - f/k: its stretch
 processing puts each path's beat tone at -k*tau + f, and it reads tau as
--f_beat/k (codar-sounder sigmondb.py:91-93).  chirp-recorder's delay_ns holds
+-f_beat/k (codar-sounder sigmondb.rows_for_cpi).  chirp-recorder's delay_ns holds
 tau, with the Doppler removed (detect.py).  So each chirp-recorder row enters
 the comparison as delay_ns - doppler_hz / rate_hz_per_s, codar-sounder's
 quantity; a chirp-recorder row with no Doppler stays out.
@@ -43,6 +43,7 @@ import json
 import logging
 import math
 import os
+import re
 import sqlite3
 import stat
 import statistics
@@ -129,15 +130,21 @@ def sweep_of(group_key: str) -> float:
     return period_of(group_key)
 
 
+_VERSION_RE = re.compile(r"(\d+)\.(\d+)(?:\.(\d+))?")
+
+
 def _version(text: str) -> Optional[tuple]:
-    """(major, minor, patch) of "codar-sounder/X.Y.Z", else None."""
+    """(major, minor, patch) of "codar-sounder/X.Y.Z", else None.
+
+    Only the leading X.Y[.Z] counts, so a local or dev build such as
+    0.8.0+g1234 or 0.8.1.dev3 parses as its release (a missing patch reads 0)."""
     name, _, ver = str(text or "").partition("/")
     if name != "codar-sounder":
         return None
-    try:
-        return tuple(int(p) for p in ver.split(".")[:3])
-    except ValueError:
+    m = _VERSION_RE.match(ver.strip())
+    if m is None:
         return None
+    return int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)
 
 
 def _half_sweep_fixed(row: dict) -> bool:
@@ -154,9 +161,11 @@ def from_codar_convention(rows: list[dict]) -> list[dict]:
     (codar-sounder dechirp.make_replica); the transmitted chirp sweeps through
     the centre at mid-sweep (hamsci-dsp's waveform, codar-mf/clean.py; the
     golden captures' spectra sit +-B/2 around 4.463 MHz).  So codar-sounder's
-    beat reads tau + S/2, S the sweep duration, and its delay_ns sits half a
-    sweep (0.5 s at 4.463 MHz) from the schema's sweep start (Task 18 round
-    2, measured on codar-sounder's own rows_for_cpi; review round 2, section 2).
+    beat reads tau + S/2, S the sweep duration.  Releases before 0.8.0 wrote
+    that beat into delay_ns, half a sweep (0.5 s at 4.463 MHz) from the
+    schema's sweep start (Task 18 round 2, measured on codar-sounder's own
+    rows_for_cpi; review round 2, section 2).  Release 0.8.0 takes the half
+    sweep off itself.
 
     Assumption: codar-sounder's channel centre equals the group's centre.  It
     tunes one channel to its first transmitter's centre; a transmitter at
