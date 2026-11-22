@@ -132,11 +132,28 @@ def test_from_codar_carries_channels_exactly(tmp_etc, run_cli, codar_kfs_file):
     for k in ("coherent_seconds", "range_min_km", "range_max_km", "snr_threshold_db",
               "max_peaks_per_cpi", "clutter_window"):
         assert cfg.raw["physics"][k] == CODAR_KFS_PROCESSING[k]
-    assert cfg.raw["channel"][0]["tdma_offset_samples"] == CODAR_KFS_TDMA
-    assert "tdma_offset_samples" not in cfg.raw["channel"][1]
+    # codar-sounder offsets do not carry over (test_from_codar_drops_tdma_offsets)
+    assert all("tdma_offset_samples" not in c for c in cfg.raw["channel"])
     # codar's own receiver position travels with the channels
     assert cfg.position_source == "precise"
     assert (cfg.receiver_lat, cfg.receiver_lon) == (COORD_LAT, COORD_LON)
+
+
+def test_from_codar_drops_tdma_offsets(tmp_etc, run_cli_full, codar_kfs_file):
+    """A codar-sounder offset has the opposite sign and no UTC reference, so no
+    conversion rescues it: the import drops it and says so, one line each."""
+    rc, _, err = run_cli_full(*INIT, "--instance", "KFS-MAIN", "--reporter-id", "KFS/MAIN",
+                              "--from-codar", str(codar_kfs_file))
+    assert rc == 0
+    cfg = load_instance("KFS-MAIN", tmp_etc)
+    assert all("tdma_offset_samples" not in c for c in cfg.raw["channel"])
+    lines = [ln for ln in err.splitlines() if "tdma_offset_samples" in ln]
+    assert len(lines) == len(CODAR_KFS_TDMA)
+    for tx, old in CODAR_KFS_TDMA.items():
+        ln = next(ln for ln in lines if f" {tx} " in ln)
+        assert str(old) in ln
+        assert "opposite sign" in ln and "UTC" in ln
+        assert "delay_ns" in ln and "path delay" in ln
 
 
 def test_from_codar_ignores_a_placeholder_position(tmp_path, tmp_etc, run_cli,

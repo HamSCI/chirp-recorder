@@ -202,13 +202,10 @@ def _max_channels(args, env) -> int:
     return n
 
 
-def _channel_block(plan: ChannelPlan, tdma: Optional[dict] = None) -> dict:
-    blk = {"name": plan.name, "status": plan.status, "centre_hz": plan.centre_hz,
-           "sample_rate_hz": plan.sample_rate_hz,
-           "transmitters": [t for g in plan.groups for t in g.tx_ids]}
-    if tdma:
-        blk["tdma_offset_samples"] = tdma
-    return blk
+def _channel_block(plan: ChannelPlan) -> dict:
+    return {"name": plan.name, "status": plan.status, "centre_hz": plan.centre_hz,
+            "sample_rate_hz": plan.sample_rate_hz,
+            "transmitters": [t for g in plan.groups for t in g.tx_ids]}
 
 
 def _picked_channels(status: str, pos: dict, key: str, rid: str, cap: int) -> list[dict]:
@@ -262,8 +259,15 @@ def _codar_channels(doc: dict, seed: dict) -> list[dict]:
         if missing:
             raise Refused(f"--from-codar: [[radiod]] block {label}: transmitter(s) "
                           f"{', '.join(missing)} are not in the seed catalogue")
-        tdma = {str(t["id"]): int(t["tdma_offset_samples"]) for t in txs
-                if "tdma_offset_samples" in t}
+        # A codar-sounder offset counts with the opposite sign from an
+        # unreferenced scan buffer; no conversion rescues it, so it is dropped.
+        for t in txs:
+            if "tdma_offset_samples" in t:
+                print(f"chirp-recorder: --from-codar: dropped {t['id']} "
+                      f"tdma_offset_samples = {t['tdma_offset_samples']}: codar-sounder "
+                      "counts it with the opposite sign and no UTC reference.  Re-derive "
+                      "it from chirp-recorder's own rows: (delay_ns - path delay) * "
+                      "sample_rate_hz / 1e9, mod one period.", file=sys.stderr)
         name = f"{float(centre) / 1e6:.4f}MHz"
         while name in used:
             name += "b"
@@ -274,7 +278,7 @@ def _codar_channels(doc: dict, seed: dict) -> list[dict]:
         if errs:
             raise Refused(f"--from-codar: [[radiod]] block {label} cannot be recorded: "
                           + "; ".join(errs))
-        out.append(_channel_block(plan, tdma))
+        out.append(_channel_block(plan))
     return out
 
 
