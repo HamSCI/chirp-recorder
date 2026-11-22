@@ -129,9 +129,11 @@ def test_from_codar_carries_channels_exactly(tmp_etc, run_cli, codar_kfs_file):
     assert [c.status for c in cfg.channels] == ["kfs-omni-status.local"] * 2
     assert [c.sample_rate_hz for c in cfg.channels] == [64000, 64000]
     assert [t for g in cfg.channels[0].groups for t in g.tx_ids] == ["ASSA", "CEDR", "LISL"]
-    for k in ("coherent_seconds", "range_min_km", "range_max_km", "snr_threshold_db",
+    for k in ("coherent_seconds", "range_min_km", "range_max_km",
               "max_peaks_per_cpi", "clutter_window"):
         assert cfg.raw["physics"][k] == CODAR_KFS_PROCESSING[k]
+    # the threshold converts to the energy scale (test_from_codar_doubles_snr_threshold)
+    assert cfg.raw["physics"]["snr_threshold_db"] == 2 * CODAR_KFS_PROCESSING["snr_threshold_db"]
     # codar-sounder offsets do not carry over (test_from_codar_drops_tdma_offsets)
     assert all("tdma_offset_samples" not in c for c in cfg.raw["channel"])
     # codar's own receiver position travels with the channels
@@ -154,6 +156,21 @@ def test_from_codar_drops_tdma_offsets(tmp_etc, run_cli_full, codar_kfs_file):
         assert str(old) in ln
         assert "opposite sign" in ln and "UTC" in ln
         assert "delay_ns" in ln and "path delay" in ln
+
+
+def test_from_codar_doubles_snr_threshold(tmp_etc, run_cli_full, codar_kfs_file):
+    """codar-sounder's snr_threshold_db sits on its magnitude-sum profile;
+    chirp-recorder's energy-sum profile reads about twice the dB for a
+    concentrated peak, so the import doubles it and says so in one line."""
+    rc, _, err = run_cli_full(*INIT, "--instance", "KFS-MAIN", "--reporter-id", "KFS/MAIN",
+                              "--from-codar", str(codar_kfs_file))
+    assert rc == 0
+    old = CODAR_KFS_PROCESSING["snr_threshold_db"]
+    assert load_instance("KFS-MAIN", tmp_etc).raw["physics"]["snr_threshold_db"] == 2 * old
+    lines = [ln for ln in err.splitlines() if "snr_threshold_db" in ln]
+    assert len(lines) == 1
+    assert f"{old:g}" in lines[0] and f"{2 * old:g}" in lines[0]
+    assert "energy" in lines[0] and "magnitude" in lines[0]
 
 
 def test_from_codar_ignores_a_placeholder_position(tmp_path, tmp_etc, run_cli,

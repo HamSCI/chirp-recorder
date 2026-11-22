@@ -313,6 +313,17 @@ def build_document(args, env) -> tuple[str, str, dict, dict]:
     if codar is not None:
         proc = codar.get("processing") or {}
         phys = {k: proc[k] for k in CODAR_PHYSICS_KEYS if k in proc}
+        if isinstance(phys.get("snr_threshold_db"), (int, float)) \
+                and not isinstance(phys["snr_threshold_db"], bool):
+            # codar-sounder's threshold sits on its magnitude-sum profile;
+            # chirp-recorder sums energy (physics.2), which reads about twice
+            # the dB for a concentrated peak.  Doubling keeps the operating
+            # point, as the default's 5 -> 10 dB did (config.PHYSICS_DEFAULTS).
+            old = float(phys["snr_threshold_db"])
+            phys["snr_threshold_db"] = 2 * old
+            print(f"chirp-recorder: --from-codar: snr_threshold_db {old:g} -> {2 * old:g} dB: "
+                  "codar-sounder's profile sums magnitude, chirp-recorder's sums energy, "
+                  "which reads about twice the dB for the same peak", file=sys.stderr)
         if phys:
             doc["physics"] = phys
     doc["channel"] = channels
