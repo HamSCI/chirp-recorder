@@ -121,12 +121,11 @@ class TransmitterPipeline:
             self.sweep_bw_hz, self.ground_distance_km, self.tdma_offset_samples)
 
     def replica_start_samples(self, cpi_start_ns: int) -> float:
-        """The CPI sample where this TX's sweep crosses the channel centre
-        (make_replica's phase_offset_samples): its configured sweep-start
-        phase after the UTC second, plus half a sweep, less the CPI's own
-        phase after the second."""
+        """The CPI sample where this TX's sweep starts (make_replica's
+        phase_offset_samples): its configured sweep-start phase after the
+        UTC second, less the CPI's own phase after the second."""
         n = int(round(self.sample_rate_hz / self.sweep_repetition_hz))
-        return (self.tdma_offset_samples + self.sweep_s * self.sample_rate_hz / 2
+        return (self.tdma_offset_samples
                 - utc_phase_samples(cpi_start_ns, self.sample_rate_hz, n)) % n
 
     def process_cpi(self, rx_samples, cpi_start_utc: datetime, *,

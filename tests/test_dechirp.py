@@ -75,7 +75,10 @@ def _synth_chirp(
         # ((t - tdma - delay) mod sweep_period) seconds.
         t_into_sweep = (t - tdma - delay) % sweep_period
         valid = t >= (tdma + delay)
-        phase = 2.0 * np.pi * 0.5 * sweep_rate_hz_per_s * t_into_sweep ** 2
+        # The sweep starts at the band edge and crosses the channel centre
+        # half a period later (hamsci_dsp's chirp model, a real CODAR sweep).
+        phase = (2.0 * np.pi * 0.5 * sweep_rate_hz_per_s
+                 * (t_into_sweep - sweep_period / 2) ** 2)
         echo = amp * np.exp(1j * phase).astype(np.complex64)
         echo[~valid] = 0
         rx += echo
@@ -685,10 +688,10 @@ def _beat_ms(result) -> float:
 
 
 class TestOffsetConvention:
-    """``phase_offset_samples = s`` puts the replica's centre crossing (this
-    model's sweep zero, as in _synth_chirp) at buffer sample +s.  A signal
-    whose zero sits there, 2 ms away, reads 2 ms.  Offsets 0 and P/2 cannot
-    tell the two signs apart; 0.2 s and 0.7 s can."""
+    """``phase_offset_samples = s`` starts the replica's sweep at buffer
+    sample +s.  A transmitter whose sweep starts there, 2 ms away, reads 2 ms
+    (51.47 beat bins: the nearest bin, 51, reads 1.98 ms).  Offsets 0 and P/2
+    cannot tell the two signs apart; 0.2 s and 0.7 s can."""
 
     @pytest.mark.parametrize("rate", [SWEEP_RATE_HZ_PER_S, -SWEEP_RATE_HZ_PER_S])
     @pytest.mark.parametrize("tx_s", [0.0, 0.2, 0.5, 0.7])
@@ -698,7 +701,7 @@ class TestOffsetConvention:
         result = dechirp(rx, sample_rate_hz=SAMPLE_RATE_HZ, sweep_rate_hz_per_s=rate,
                          sweep_repetition_hz=SRF_HZ,
                          phase_offset_samples=int(round(tx_s * SAMPLE_RATE_HZ)))
-        assert _beat_ms(result) == pytest.approx(2.0, abs=0.1)
+        assert _beat_ms(result) == pytest.approx(1.98, abs=0.01)
 
     def test_a_fractional_offset_is_honoured(self):
         """A half-sample start reads the same path as the whole-sample one."""
@@ -708,7 +711,7 @@ class TestOffsetConvention:
         result = dechirp(rx, sample_rate_hz=SAMPLE_RATE_HZ,
                          sweep_rate_hz_per_s=SWEEP_RATE_HZ_PER_S, sweep_repetition_hz=SRF_HZ,
                          phase_offset_samples=tx_s * SAMPLE_RATE_HZ)
-        assert _beat_ms(result) == pytest.approx(2.0, abs=0.1)
+        assert _beat_ms(result) == pytest.approx(1.98, abs=0.01)
 
 
 class TestUpChirp:
@@ -723,3 +726,31 @@ class TestUpChirp:
                          sweep_repetition_hz=SRF_HZ)
         ranges, prof = positive_range_window(result, range_profile(result))
         assert abs(float(ranges[int(np.argmax(prof))]) - target_range_km) < 25.0
+
+
+class TestCpiPhase:
+    """The same transmitter, sweeping from the UTC second, read from buffers
+    that open at four phases of the second: the replica follows the phase,
+    the path reads 2 ms and its bin keeps its power within 1 dB."""
+
+    @pytest.mark.parametrize("rate", [SWEEP_RATE_HZ_PER_S, -SWEEP_RATE_HZ_PER_S])
+    def test_path_bin_holds_across_cpi_phases(self, rate, monkeypatch):
+        # The per-sweep MAD pre-filter zeroes a clean sweep now and then on
+        # stationary synthetic input, and a zeroed sweep moves the
+        # |range-Doppler| sum by a few dB.  That has nothing to do with the
+        # CPI phase, so it is switched off here.
+        import chirp_recorder.physics.dechirp as dc
+        monkeypatch.setattr(dc, "SWEEP_MAD_REJECTION_K", float("inf"))
+        powers = []
+        for phase_s in (0.0, 0.25, 0.6, 0.75):
+            # the buffer opens phase_s after the second: the sweep started -phase_s ago
+            rx = _synth_chirp(12 * N_SAMPLES, [2e-3], [1.0], sweep_rate_hz_per_s=rate,
+                              target_tdma_offsets_s=[-phase_s], noise_db=-20.0)
+            r = dechirp(rx, sample_rate_hz=SAMPLE_RATE_HZ, sweep_rate_hz_per_s=rate,
+                        sweep_repetition_hz=SRF_HZ,
+                        phase_offset_samples=(-phase_s * SAMPLE_RATE_HZ) % N_SAMPLES)
+            prof = np.abs(r.range_doppler).sum(axis=0)
+            i = int(np.argmax(prof))
+            assert float(r.range_axis_km[i]) / C_KM_PER_S * 1e3 == pytest.approx(1.98, abs=0.01)
+            powers.append(10 * np.log10(prof[i] / r.range_doppler.shape[0]))
+        assert max(powers) - min(powers) < 1.0, powers

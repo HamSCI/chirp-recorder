@@ -19,7 +19,7 @@ daemon can:
   - convert to per-TX ``tdma_offset_samples`` config entries by
     subtracting each TX's known direct-path delay (= ground distance /
     speed of light), adding the buffer's own phase after the UTC second,
-    taking off half a sweep (centre crossing to sweep start), and rounding to the nearest sample (``offset_for_tx``);
+    and rounding to the nearest sample (``offset_for_tx``);
   - feed back to ``dechirp(..., phase_offset_samples=...)`` per TX so
     each TX's returns are extracted with cross-suppression of the
     others.
@@ -193,26 +193,22 @@ def offset_for_tx(
     sample_rate_hz: float,
     n_per_sweep: int,
     buffer_start_utc_ns: Optional[int] = None,
-    sweep_s: Optional[float] = None,
 ) -> int:
     """Convert a discovered cross-correlation peak into a TDMA phase offset.
 
     The cross-correlation peak position is the time-of-arrival of the
     TX's direct path within one period, counted from the scan buffer's
-    first sample; the zero-offset replica marks where the arriving sweep
-    crosses the channel centre.  The TX crossed it earlier by the
-    direct-path propagation delay (D / c); subtracting it gives the sample
-    where the TX's sweep crosses the centre in that buffer, the value
+    first sample: where the arriving sweep starts.  The TX started it
+    earlier by the direct-path propagation delay (D / c); subtracting that
+    gives the sample where the TX's sweep starts in that buffer, the value
     ``dechirp(phase_offset_samples=...)`` expects for the same buffer.
 
     With ``buffer_start_utc_ns`` (the UTC label of the buffer's first
     sample) the result is the config value instead: the TX's sweep-start
     phase after the UTC second, in samples at the channel rate (the
-    convention in ``dechirp.make_replica``).  That adds the buffer's phase
-    after the second and takes off half a sweep (``sweep_s``, default one
-    period), since the sweep starts half a sweep before it crosses the
-    centre.  The value then holds across runs, whatever phase a later CPI
-    opens at.
+    convention in ``dechirp.make_replica``).  That adds the buffer's own
+    phase after the second.  The value then holds across runs, whatever
+    phase a later CPI opens at.
 
     Args:
         correlation_peak_samples: peak index from ``discover_tx_offsets``.
@@ -220,15 +216,13 @@ def offset_for_tx(
         sample_rate_hz: IQ sample rate.
         n_per_sweep: samples per sweep period (= sample_rate / SRF).
         buffer_start_utc_ns: UTC of the scan buffer's first sample.
-        sweep_s: sweep length when shorter than the period.
     """
     direct_delay_samples = int(round(
         ground_distance_km / C_KM_PER_S * sample_rate_hz
     ))
     shift = 0.0
     if buffer_start_utc_ns is not None:
-        half = (sweep_s * sample_rate_hz if sweep_s else n_per_sweep) / 2
-        shift = utc_phase_samples(buffer_start_utc_ns, sample_rate_hz, n_per_sweep) - half
+        shift = utc_phase_samples(buffer_start_utc_ns, sample_rate_hz, n_per_sweep)
     return int(round(correlation_peak_samples - direct_delay_samples + shift)) % n_per_sweep
 
 
@@ -239,7 +233,6 @@ def match_peaks_to_txs(
     sample_rate_hz: float,
     n_per_sweep: int,
     buffer_start_utc_ns: Optional[int] = None,
-    sweep_s: Optional[float] = None,
 ) -> dict[str, int | None]:
     """Greedy nearest-peak assignment of TXs to discovered offsets.
 
@@ -283,6 +276,5 @@ def match_peaks_to_txs(
             sample_rate_hz=sample_rate_hz,
             n_per_sweep=n_per_sweep,
             buffer_start_utc_ns=buffer_start_utc_ns,
-            sweep_s=sweep_s,
         )
     return out

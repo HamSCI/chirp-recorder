@@ -46,7 +46,8 @@ def _two_tx_tdma_iq(
     ):
         t_into_sweep = (t - tdma - delay) % (1.0 / SRF_HZ)
         valid = t >= (tdma + delay)
-        phase = 2.0 * np.pi * 0.5 * SWEEP_RATE_HZ_PER_S * t_into_sweep ** 2
+        # band-edge start, centre crossing half a period later (hamsci_dsp's model)
+        phase = 2.0 * np.pi * 0.5 * SWEEP_RATE_HZ_PER_S * (t_into_sweep - 0.5 / SRF_HZ) ** 2
         echo = amp * np.exp(1j * phase).astype(np.complex64)
         echo[~valid] = 0
         rx += echo
@@ -292,8 +293,8 @@ class TestOffsetChain:
         off = offset_for_tx(pk, ground_distance_km=self.D_KM, sample_rate_hz=SAMPLE_RATE_HZ,
                             n_per_sweep=N_SAMPLES)
         # Without a UTC label the offset is the buffer sample where the TX's
-        # sweep crosses the centre, half a sweep after it starts.
-        assert off == int(round((tx_s + 0.5) % 1.0 * SAMPLE_RATE_HZ))
+        # sweep starts.
+        assert off == int(round(tx_s * SAMPLE_RATE_HZ))
         r = dechirp(rx, sample_rate_hz=SAMPLE_RATE_HZ, sweep_rate_hz_per_s=rate,
                     sweep_repetition_hz=SRF_HZ, phase_offset_samples=off)
         ranges, prof = positive_range_window(r, range_profile(r))

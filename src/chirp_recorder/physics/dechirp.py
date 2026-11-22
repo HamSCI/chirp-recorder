@@ -101,11 +101,17 @@ def make_replica(
 ) -> np.ndarray:
     """Generate one FMCW chirp replica at complex baseband.
 
-    The transmitted CODAR chirp has linearly-varying instantaneous
-    frequency ``f(t) = κ·t`` over one sweep period.  Phase = ∫f dt =
-    ½·κ·t² so the complex baseband signal is::
+    A CODAR sweep starts at one band edge, crosses the channel centre half a
+    period P later and ends at the other edge, with linearly-varying
+    instantaneous frequency ``f(t) = κ·(t - P/2)``, t counted from the sweep
+    start.  Phase = ∫f dt, so the complex baseband signal is::
 
-        s(t) = exp(j · 2π · ½ · κ · t²)
+        s(t) = exp(j · 2π · ½ · κ · (t - P/2)²)
+
+    the model hamsci_dsp's chirp (and so the sigmondb rows) uses.  The
+    replica sweeps the transmitter's whole band, +B/2 to -B/2 for a
+    down-chirp.  (codar-sounder's replica swept 0 to -B, so only the half
+    after the centre crossing matched.)
 
     A Hann window is applied by default to suppress sidelobe artifacts
     when Fourier-transforming a finite-support function (Kaeppler Eq. 6).
@@ -116,35 +122,32 @@ def make_replica(
         sweep_rate_hz_per_s: signed sweep rate (Hz/s).  Sign matters: a
             CODAR down-chirp has ``κ < 0``; up-chirps have ``κ > 0``.
         window: apply a Hann window to suppress FFT sidelobes.
-        phase_offset_samples: the buffer sample at which the replica
-            crosses the channel centre (baseband 0 Hz, where this model's
-            sweep begins).  The crossing sits at sample
-            ``+phase_offset_samples`` (modulo ``n_samples``), so a signal
-            that crosses the centre at that sample dechirps to its path
-            delay.  It may be fractional.  Default 0.
+        phase_offset_samples: the buffer sample at which the replica's
+            sweep starts, modulo ``n_samples``.  A transmitter whose sweep
+            starts at that sample dechirps to its path delay.  It may be
+            fractional.  Default 0.
 
     The offset convention, one for the whole physics path: a configured
     ``tdma_offset_samples`` is the transmitter's sweep-start phase after
     the UTC second, in samples at the channel rate, and the replica starts
-    there.  A CODAR sweep starts at one band edge and crosses the centre
-    half a sweep later, so ``TransmitterPipeline`` passes this function the
-    configured phase plus half a sweep, less the CPI's own phase after the
-    second (:func:`utc_phase_samples`).  The sweep start is the one the
-    sigmondb rows count from (hamsci_dsp's chirp model).  codar-sounder's
-    ``make_replica`` put the crossing at ``-offset`` instead; the two agree
-    only at 0 and ``n_samples/2``.
+    there.  ``TransmitterPipeline`` passes this function the configured
+    phase less the CPI's own phase after the second
+    (:func:`utc_phase_samples`).  The sweep start is the one the sigmondb
+    rows count from.  codar-sounder's ``make_replica`` put its zero at
+    ``-offset`` instead; the two agree only at 0 and ``n_samples/2``.
     """
     if n_samples <= 0:
         raise ValueError(f"n_samples must be > 0; got {n_samples}")
     if sample_rate_hz <= 0:
         raise ValueError(f"sample_rate_hz must be > 0; got {sample_rate_hz}")
 
-    # Time since the centre crossing, modulo one period so the replica
-    # wraps continuously: the crossing sits at sample +phase_offset_samples,
-    # so sample n is (n - offset) mod N samples past it.
+    # Time into the sweep, modulo one period so the replica wraps
+    # continuously: the sweep starts at sample +phase_offset_samples, so
+    # sample n is (n - offset) mod N samples into it.
     offset = float(phase_offset_samples) % n_samples
     t_into_sweep = ((np.arange(n_samples) - offset) % n_samples) / sample_rate_hz
-    phase = 2.0 * np.pi * 0.5 * sweep_rate_hz_per_s * t_into_sweep * t_into_sweep
+    half = n_samples / sample_rate_hz / 2
+    phase = np.pi * sweep_rate_hz_per_s * (t_into_sweep - half) ** 2
     replica = np.exp(1j * phase)
     if window:
         replica = replica * np.hanning(n_samples)
@@ -191,8 +194,10 @@ def dechirp(
         apply_window: pass a Hann window through to the replica
             generator.
         phase_offset_samples: the buffer sample where this TX's sweep
-            crosses the channel centre (see ``make_replica``).  Selects
-            which TX in a shared band to dechirp.  Default 0.
+            starts (see ``make_replica``).  Selects which TX in a shared
+            band to dechirp.  The rows start at the first whole sample at
+            or after it, so a nonzero offset costs up to one sweep at the
+            head of the CPI.  Default 0.
     """
     if rx_samples.dtype.kind != "c":
         raise ValueError(
@@ -208,16 +213,25 @@ def dechirp(
         raise ValueError(
             f"sample_rate_hz / sweep_repetition_hz = {n_samples} must be > 1"
         )
-    n_sweeps = len(rx_samples) // n_samples
+    # Cut the rows at the transmitter's sweep start: skip to the first whole
+    # sample at or after it, and let the replica carry the fraction left.
+    # A row cut mid-sweep would put the sweep's wrap (and a phase step in
+    # the beat tone) under the window's middle, and the path's gain would
+    # then swing with the run's CPI phase.
+    offset = float(phase_offset_samples) % n_samples
+    skip = int(np.ceil(offset))
+    if skip >= n_samples:
+        skip -= n_samples
+    n_sweeps = (len(rx_samples) - skip) // n_samples
     if n_sweeps < 1:
         raise ValueError(
-            f"need at least one full sweep ({n_samples} samples); "
-            f"got {len(rx_samples)}"
+            f"need at least one full sweep ({n_samples} samples) after the "
+            f"sweep start at sample {skip}; got {len(rx_samples)}"
         )
 
     # Reshape into M × N: rows are sweeps (slow time), columns are samples
     # within one sweep (fast time).
-    rx_matrix = rx_samples[: n_sweeps * n_samples].reshape(n_sweeps, n_samples)
+    rx_matrix = rx_samples[skip: skip + n_sweeps * n_samples].reshape(n_sweeps, n_samples)
 
     # Build the replica and dechirp each sweep by multiplying with the
     # complex-conjugate.  The result has a beat tone for each propagation
@@ -225,7 +239,7 @@ def dechirp(
     replica = make_replica(
         n_samples, sample_rate_hz, sweep_rate_hz_per_s,
         window=apply_window,
-        phase_offset_samples=phase_offset_samples,
+        phase_offset_samples=offset - skip,
     )
     dechirped = rx_matrix * np.conj(replica)
 

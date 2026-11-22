@@ -273,37 +273,12 @@ PHYS_INPUT_RATE = 129_600_000
 PHYS_START_NS = 1_800_000_000 * 10**9 + 250_000_000
 
 
-def phys_tx_block():
-    return {"id": "TX1", "center_freq_hz": 4_463_000,
-            "sweep_rate_hz_per_s": PHYS_SWEEP_RATE, "sweep_bw_hz": 25_734.0,
-            "sweep_repetition_hz": 1.0, "tx_lat_deg": PHYS_TX[0],
-            "tx_lon_deg": PHYS_TX[1]}
-
-
-@pytest.fixture
-def tx_block():
-    return phys_tx_block()
-
-
-@pytest.fixture
-def ref_kw():
-    """codar-sounder's _TransmitterPipeline keywords that match PHYS_SETTINGS."""
-    return dict(receiver_lat=PHYS_RX[0], receiver_lon=PHYS_RX[1], radiod_id="b4",
-                radiod_status_dns="radiod.local", sample_rate_hz=float(PHYS_RATE),
-                coherent_seconds=60.0, range_min_km=200.0, range_max_km=800.0,
-                snr_threshold_db=5.0, clutter_window=20, max_peaks_per_cpi=4,
-                host_call="AC0G", host_grid="EM38", reporter_id="AC0G/B4",
-                processing_version="codar-ref")
-
-
 @pytest.fixture
 def physics_settings():
     return dict(enabled=True, coherent_seconds=60, range_min_km=200, range_max_km=800,
                 snr_threshold_db=5.0, max_peaks_per_cpi=4, clutter_window=20,
-                # codar-sounder's synthetic TX crosses the channel centre at
-                # x[0], 0.25 s after the UTC second (PHYS_START_NS), so its
-                # sweep starts half a sweep earlier: 0.75 s after the second.
-                interval_s=30, tdma_offset_samples={"TX1": PHYS_RATE * 3 // 4},
+                # synth_cpi's TX starts its sweep on the UTC second
+                interval_s=30, tdma_offset_samples={"TX1": 0},
                 receiver_lat=PHYS_RX[0], receiver_lon=PHYS_RX[1],
                 position_source="precise")
 
@@ -320,21 +295,30 @@ def plan_and_txs():
     return plan, {"TX1": tx}
 
 
+def phys_cpi(*, fs=PHYS_RATE, seconds=60, group_range_km=420.0, rate=PHYS_SWEEP_RATE,
+             tx_s=0.0, start_ns=PHYS_START_NS, noise_db=-40.0, seed=0):
+    """One CPI of a transmitter whose sweep starts tx_s after the UTC second
+    (band edge first, centre crossing half a period later: hamsci_dsp's
+    model), heard over group_range_km, in a CPI whose first sample is at
+    start_ns.  Returns (x, start datetime)."""
+    import numpy as np
+    b = (start_ns % 10**9) / 1e9
+    u = (b + np.arange(int(seconds * fs)) / fs - tx_s - group_range_km / 299_792.458) % 1.0
+    x = np.exp(1j * np.pi * rate * (u - 0.5) ** 2).astype(np.complex64)
+    a = 10 ** (noise_db / 20.0)
+    rng = np.random.default_rng(seed)
+    x += (a * (rng.standard_normal(x.size) + 1j * rng.standard_normal(x.size))
+          ).astype(np.complex64)
+    start = _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc) + _dt.timedelta(
+        microseconds=start_ns // 1000)
+    return x, start
+
+
 @pytest.fixture
 def synth_cpi():
-    """codar-sounder's SyntheticIQSource, realtime=False: one CPI of samples."""
-    from codar_sounder.core.stream import SyntheticIQSource
-
-    def make(*, fs=PHYS_RATE, seconds=60, group_range_km=420.0, seed=0):
-        src = SyntheticIQSource(
-            sample_rate_hz=float(fs), sweep_rate_hz_per_s=PHYS_SWEEP_RATE,
-            sweep_repetition_hz=1.0, cpi_seconds=float(seconds),
-            target_group_range_km=group_range_km, realtime=False, seed=seed)
-        x, _ = next(iter(src))
-        start = _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc) + _dt.timedelta(
-            microseconds=PHYS_START_NS // 1000)
-        return x, start
-    return make
+    """phys_cpi as a fixture: the TX sweeps from the second, the CPI opens
+    0.25 s after it (PHYS_START_NS)."""
+    return phys_cpi
 
 
 def _label(utc_ns):
