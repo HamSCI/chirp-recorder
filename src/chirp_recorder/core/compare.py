@@ -14,8 +14,9 @@ rows of decision 3 (2026-11-19):
   s4, sigma_phi      reported only: median |difference| (and *_max, largest)
 
 Half a sweep.  codar-sounder's replica starts its sweep at the channel
-centre, a half sweep from where the transmitted chirp starts, so its delay
-reads tau + sweep/2 (from_codar_convention takes that back off first).
+centre, a half sweep from where the transmitted chirp starts, so releases
+before 0.8.0 wrote delay_ns as tau + sweep/2 (from_codar_convention takes
+that back off first).  codar-sounder 0.8.0 writes it from the sweep start.
 
 One convention.  codar-sounder's delay holds tau - f/k: its stretch
 processing puts each path's beat tone at -k*tau + f, and it reads tau as
@@ -58,11 +59,10 @@ MATCH_MODES = ("bin", "exact")
 COARSE_COUPLING_FACTOR = 2.0
 # The first codar-sounder release whose delay_ns starts at the sweep start
 # (the half-sweep fix), as its detector_version reads: "codar-sounder/X.Y.Z".
-# None: no release carries the fix yet, so every codar-sounder row gets
-# corrected.  Once codar-sounder ships the fix and bumps its version, set
-# this to that version string; rows of that version or later then pass
-# through unchanged, and earlier rows keep their correction.
-CODAR_HALF_SWEEP_FIXED_FROM: Optional[str] = None
+# codar-sounder 0.8.0 (commit 99371d6) takes the half sweep off in
+# rows_for_cpi; rows of that version or later pass through unchanged, and
+# earlier rows keep their correction.  None would correct every row.
+CODAR_HALF_SWEEP_FIXED_FROM: Optional[str] = "codar-sounder/0.8.0"
 # The JSONL readers run as root (sigmond's check) on files another account
 # can write: no symlinks, regular files only, at most this many bytes each.
 MAX_JSONL_BYTES = 64 * 1024 * 1024
@@ -164,7 +164,8 @@ def from_codar_convention(rows: list[dict]) -> list[dict]:
     which this function does not correct.  At 4.463 MHz the two agree.
 
     Rows whose detector_version is CODAR_HALF_SWEEP_FIXED_FROM or later pass
-    through unchanged (None: no release carries the fix, all get corrected)."""
+    through unchanged (None would correct them all).  A row whose
+    detector_version names no codar-sounder release gets corrected."""
     out = []
     for r in rows:
         if _half_sweep_fixed(r):

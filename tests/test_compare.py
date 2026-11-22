@@ -551,47 +551,52 @@ def test_codar_rows_sit_half_a_sweep_from_chirp_recorders():
     """codar-sounder's replica sweeps from the channel centre (f = k t from
     t = 0, dechirp.make_replica); the transmitted chirp, as hamsci-dsp and
     clean.py model it, sweeps through the centre at mid-sweep.  So its beat
-    reads tau + sweep/2: codar-sounder's delay_ns sits half a sweep (0.5 s at
-    4.463 MHz) from chirp-recorder's for the same path.  compare takes it
-    back off before anything else."""
+    reads tau + sweep/2.  codar-sounder 0.8.0 takes that half sweep off in
+    rows_for_cpi; compare passes its rows through and takes the half sweep
+    off a 0.7.0 row (the same row, half a sweep later)."""
     import numpy as np
     from datetime import datetime, timezone
+    from codar_sounder import __version__ as codar_version
     from codar_sounder.core.dechirp import dechirp
     from codar_sounder.core.sigmondb import rows_for_cpi
     from hamsci_dsp.chirp.waveform import Waveform, gated
     from chirp_recorder.core.compare import codar_bin_ns, from_codar_convention
     wf = Waveform(4.463e6, K, 1.0, None, 1945.6e-6, 0.5)
+    tol = codar_bin_ns(K, 1.0) / 2
     for tau in (0.0429, 0.3, 0.7):
         x = np.tile(gated(wf, 64_000, tau), 8).astype(np.complex64)
         res = dechirp(x, sample_rate_hz=64_000.0, sweep_rate_hz_per_s=K, sweep_repetition_hz=1.0)
         _, arrs = rows_for_cpi(result=res, cpi_start_utc=datetime(2026, 1, 1, tzinfo=timezone.utc),
                                tdma_offset_samples=0, centre_hz=4.463e6, period_s=1.0,
                                reporter_id="X", t_level="T6", expected=[],
-                               detector_version="v", duration_s=8)
-        raw = arrs[0]["delay_ns"]                         # its strongest peak
-        assert abs(((raw - round(tau * 1e9) - HALF_SWEEP_NS + 5 * 10**8) % 10**9) - 5 * 10**8) \
-            <= codar_bin_ns(K, 1.0) / 2
-        (back,) = from_codar_convention([arrs[0]])
-        assert abs(back["delay_ns"] - round(tau * 1e9)) <= codar_bin_ns(K, 1.0) / 2
-
+                               detector_version=f"codar-sounder/{codar_version}", duration_s=8)
+        raw = arrs[0]                                     # its strongest peak
+        assert abs(raw["delay_ns"] - round(tau * 1e9)) <= tol
+        (same,) = from_codar_convention([raw])            # 0.8.0: passes through
+        assert same["delay_ns"] == raw["delay_ns"]
+        old = dict(raw, detector_version="codar-sounder/0.7.0",
+                   delay_ns=(raw["delay_ns"] + HALF_SWEEP_NS) % 10**9)
+        (back,) = from_codar_convention([old])
+        assert abs(back["delay_ns"] - round(tau * 1e9)) <= tol
 
 
 def test_the_half_sweep_correction_stops_at_the_fixed_codar_sounder_version(monkeypatch):
-    """CODAR_HALF_SWEEP_FIXED_FROM = None corrects every codar-sounder row.
-    Set to the first fixed release ("codar-sounder/X.Y.Z"), it leaves rows of
-    that release or later alone, so compare never corrects them twice."""
+    """CODAR_HALF_SWEEP_FIXED_FROM names codar-sounder 0.8.0, the first fixed
+    release: its rows and later ones pass through, 0.7.0 rows and rows that
+    name no codar-sounder release get corrected.  None corrects them all."""
     import chirp_recorder.core.compare as C
     from chirp_recorder.core.compare import from_codar_convention
-    assert C.CODAR_HALF_SWEEP_FIXED_FROM is None
+    assert C.CODAR_HALF_SWEEP_FIXED_FROM == "codar-sounder/0.8.0"
     row = dict(rows("codar", [4_120_000], doppler_hz=0.0)[0], delay_ns=504_120_000)
     old = dict(row, detector_version="codar-sounder/0.7.0")
     new = dict(row, detector_version="codar-sounder/0.8.0")
+    later = dict(row, detector_version="codar-sounder/0.10.1")
     odd = dict(row, detector_version="something-else")
-    assert [r["delay_ns"] for r in from_codar_convention([old, new, odd])] == [4_120_000] * 3
-    monkeypatch.setattr(C, "CODAR_HALF_SWEEP_FIXED_FROM", "codar-sounder/0.8.0")
-    got = [r["delay_ns"] for r in from_codar_convention(
-        [old, new, dict(row, detector_version="codar-sounder/0.10.1"), odd])]
+    got = [r["delay_ns"] for r in from_codar_convention([old, new, later, odd])]
     assert got == [4_120_000, 504_120_000, 504_120_000, 4_120_000]
+    monkeypatch.setattr(C, "CODAR_HALF_SWEEP_FIXED_FROM", None)
+    assert [r["delay_ns"] for r in from_codar_convention([old, new, later, odd])] \
+        == [4_120_000] * 4
 
 
 # --- round 3: the readers run as root on files another account can write ----
