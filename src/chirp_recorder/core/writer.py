@@ -13,7 +13,7 @@ import logging
 import queue
 import re
 import threading
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -126,7 +126,8 @@ class PhaseStore:
 
 class RowWriter(threading.Thread):
     def __init__(self, *, output_dir: Path, sink_writers: Optional[tuple],
-                 phase_store: Optional[PhaseStore], queue_max: int = QUEUE_MAX):
+                 phase_store: Optional[PhaseStore], queue_max: int = QUEUE_MAX,
+                 today=None):
         super().__init__(name="chirp-row-writer", daemon=True)
         self.output_dir = Path(output_dir)
         self.sink_writers = sink_writers
@@ -138,7 +139,11 @@ class RowWriter(threading.Thread):
         self._closed = False
         self._jsonl_lock = threading.Lock()
         self._jsonl_ok = True
-        self._rows_pruned_for: Optional[str] = None
+        self._rows_pruned_for: Optional[date] = None
+        # Pruning is housekeeping: it counts from the host's UTC date, never
+        # from a row's label, so a label that jumps forward cannot delete the
+        # archive.  (The host clock judges file age only.)
+        self._today = today or (lambda: datetime.now(timezone.utc).date())
         self.start()
 
     @property
@@ -228,9 +233,9 @@ class RowWriter(threading.Thread):
                 self._bump("jsonl_failures")
                 self._jsonl_state(False, exc)
         with self._jsonl_lock:
-            for day in sorted(by_day):
-                if self._rows_pruned_for is None or day > self._rows_pruned_for:
-                    self._prune_rows(day)
+            host_day = self._today()
+            if by_day and self._rows_pruned_for != host_day:
+                self._prune_rows(host_day)
             for day, lines in by_day.items():
                 try:
                     d = self.output_dir / "rows"
@@ -246,14 +251,11 @@ class RowWriter(threading.Thread):
         if ok:
             self._jsonl_state(True, None)
 
-    def _prune_rows(self, day: str) -> None:
-        """Drop rows/YYYY-MM-DD.jsonl more than ROWS_KEEP_DAYS before ``day``,
-        the UTC day of the rows being written (never the host clock)."""
-        self._rows_pruned_for = day
-        try:
-            cutoff = (date.fromisoformat(day) - timedelta(days=ROWS_KEEP_DAYS)).isoformat()
-        except ValueError:
-            return
+    def _prune_rows(self, host_day: date) -> None:
+        """Drop rows/YYYY-MM-DD.jsonl dated more than ROWS_KEEP_DAYS before
+        the host's UTC date.  A file dated after that cutoff always stays."""
+        self._rows_pruned_for = host_day
+        cutoff = (host_day - timedelta(days=ROWS_KEEP_DAYS)).isoformat()
         for f in (self.output_dir / "rows").glob("????-??-??.jsonl"):
             if f.stem < cutoff:
                 try:

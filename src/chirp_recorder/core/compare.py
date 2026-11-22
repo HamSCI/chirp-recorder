@@ -39,15 +39,33 @@ fault, ledger codar-live-faults).
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import sqlite3
+import stat
 import statistics
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+log = logging.getLogger(__name__)
+
 PAIR_WINDOW_NS = 120_000          # clusters closer than this pair up (the cluster gap)
 MATCH_MODES = ("bin", "exact")
+# |1 - g| for a coarse row (tau - g f/k) against codar-sounder's tau - f/k:
+# |g| <= 1, so at most 2 (real captures showed g down to -0.7).
+COARSE_COUPLING_FACTOR = 2.0
+# The first codar-sounder release whose delay_ns starts at the sweep start
+# (the half-sweep fix), as its detector_version reads: "codar-sounder/X.Y.Z".
+# None: no release carries the fix yet, so every codar-sounder row gets
+# corrected.  Once codar-sounder ships the fix and bumps its version, set
+# this to that version string; rows of that version or later then pass
+# through unchanged, and earlier rows keep their correction.
+CODAR_HALF_SWEEP_FIXED_FROM: Optional[str] = None
+# The JSONL readers run as root (sigmond's check) on files another account
+# can write: no symlinks, regular files only, at most this many bytes each.
+MAX_JSONL_BYTES = 64 * 1024 * 1024
 RUNG_TOL_NS = 300_000
 MAX_RUNG = 4
 KFS_TWIN_NS = 1_632_000
@@ -111,17 +129,47 @@ def sweep_of(group_key: str) -> float:
     return period_of(group_key)
 
 
+def _version(text: str) -> Optional[tuple]:
+    """(major, minor, patch) of "codar-sounder/X.Y.Z", else None."""
+    name, _, ver = str(text or "").partition("/")
+    if name != "codar-sounder":
+        return None
+    try:
+        return tuple(int(p) for p in ver.split(".")[:3])
+    except ValueError:
+        return None
+
+
+def _half_sweep_fixed(row: dict) -> bool:
+    if CODAR_HALF_SWEEP_FIXED_FROM is None:
+        return False
+    have, fixed = _version(row.get("detector_version")), _version(CODAR_HALF_SWEEP_FIXED_FROM)
+    return have is not None and fixed is not None and have >= fixed
+
+
 def from_codar_convention(rows: list[dict]) -> list[dict]:
     """codar-sounder rows moved half a sweep back, onto chirp-recorder's sweep start.
 
-    codar-sounder's replica sweeps from the channel centre, f = k t from t = 0
+    codar-sounder's replica sweeps from its channel centre, f = k t from t = 0
     (codar-sounder dechirp.make_replica); the transmitted chirp sweeps through
-    the centre at mid-sweep (hamsci-dsp's waveform, codar-mf/clean.py).  So
-    codar-sounder's beat reads tau + sweep/2, and its delay_ns sits half a
-    sweep (0.5 s at 4.463 MHz) from chirp-recorder's for the same path (Task
-    18 round 2, measured on codar-sounder's own rows_for_cpi)."""
+    the centre at mid-sweep (hamsci-dsp's waveform, codar-mf/clean.py; the
+    golden captures' spectra sit +-B/2 around 4.463 MHz).  So codar-sounder's
+    beat reads tau + S/2, S the sweep duration, and its delay_ns sits half a
+    sweep (0.5 s at 4.463 MHz) from the schema's sweep start (Task 18 round
+    2, measured on codar-sounder's own rows_for_cpi; review round 2, section 2).
+
+    Assumption: codar-sounder's channel centre equals the group's centre.  It
+    tunes one channel to its first transmitter's centre; a transmitter at
+    another centre in that channel shifts by a further (f_tx - f_channel)/k,
+    which this function does not correct.  At 4.463 MHz the two agree.
+
+    Rows whose detector_version is CODAR_HALF_SWEEP_FIXED_FROM or later pass
+    through unchanged (None: no release carries the fix, all get corrected)."""
     out = []
     for r in rows:
+        if _half_sweep_fixed(r):
+            out.append(dict(r))
+            continue
         gk = r.get("group_key", "")
         p_ns = round(period_of(gk) * 1e9)
         half = round(sweep_of(gk) * 1e9 / 2)
@@ -304,9 +352,9 @@ def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float 
     Fine tier: chirp-recorder rows with a usable Doppler (is_fine), converted
     to codar-sounder's tau - f/k.  It alone feeds `matched` and `doppler`.
     Coarse tier (coarse=True): every other T6 row, on its own uncorrected
-    delay.  Such a row holds tau - g f/k with g in [-0.5, 1] (Task 18 review,
-    R1-I4), so against codar-sounder's tau - f/k it differs by (1 - g) f/k: a
-    coarse cluster covers a codar cluster when |d| <= limit + 1.5 |f/k|, f the
+    delay.  Such a row holds tau - g f/k with |g| <= 1 (Task 18 review,
+    R1-I4, M-a of round 2), so against codar-sounder's tau - f/k it differs by (1 - g) f/k: a
+    coarse cluster covers a codar cluster when |d| <= limit + 2 |f/k|, f the
     codar cluster's median Doppler.  `coverage` counts both tiers;
     `matched_coarse` reports the coarse pairs and gates nothing.
 
@@ -335,7 +383,7 @@ def compare(chirp_rows, codar_rows, *, tol_ns: int = 5_000, min_fraction: float 
     def coarse_limit_ns(c: Cluster) -> float:
         f = c.median_doppler_hz or 0.0
         k = c.rate_hz_per_s
-        return limit_ns(c) + (1.5 * abs(f / k) * 1e9 if k else 0.0)
+        return limit_ns(c) + (COARSE_COUPLING_FACTOR * abs(f / k) * 1e9 if k else 0.0)
 
     pairs, paired_codar, paired_chirp = _pair(
         chirp, codar, lambda c: max(PAIR_WINDOW_NS, limit_ns(c)))
@@ -446,10 +494,13 @@ def read_jsonl_rows(rows_dir: Path, *, reporter_id: str, since_iso: str,
     for f in sorted(d.glob(pattern)):
         if not (since_iso[:10] <= day_of(f.stem) <= until_iso[:10]):
             continue
-        for line in f.read_text().splitlines():
+        text = _read_capped(f)
+        if text is None:
+            continue
+        for line in text.splitlines():
             try:
                 r = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             if not isinstance(r, dict):
                 continue
@@ -461,6 +512,39 @@ def read_jsonl_rows(rows_dir: Path, *, reporter_id: str, since_iso: str,
             r.pop("table", None)
             out.append(r)
     return out
+
+
+def _read_capped(path: Path) -> Optional[str]:
+    """A file's text, or None (logged) when it is a symlink, not a regular
+    file, or larger than MAX_JSONL_BYTES.  Opens with O_NOFOLLOW and
+    O_NONBLOCK (a FIFO never blocks), then checks the open file by fstat."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as exc:
+        log.warning("%s skipped: cannot open safely (%s)", path.name, exc)
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            log.warning("%s skipped: not a regular file", path.name)
+            return None
+        if st.st_size > MAX_JSONL_BYTES:
+            log.warning("%s skipped: %d bytes, over the %d-byte cap", path.name,
+                        st.st_size, MAX_JSONL_BYTES)
+            return None
+        with os.fdopen(fd, "rb", closefd=True) as fh:
+            fd = -1
+            data = fh.read(MAX_JSONL_BYTES + 1)
+        if len(data) > MAX_JSONL_BYTES:          # grew while we read
+            log.warning("%s skipped: over the %d-byte cap", path.name, MAX_JSONL_BYTES)
+            return None
+        return data.decode("utf-8", errors="replace")
+    except OSError as exc:
+        log.warning("%s skipped: %s", path.name, exc)
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def read_codar_jsonl_rows(rows_dir: Path, *, reporter_id: str, since_iso: str,
@@ -476,7 +560,9 @@ def read_codar_jsonl_rows(rows_dir: Path, *, reporter_id: str, since_iso: str,
     time, reporter_id, group_key, rate_hz_per_s, delay_ns, doppler_hz, s4,
     sigma_phi_rad, u_epoch_ns, ...), with no wrapper keys.  Its delay_ns keeps
     codar-sounder's convention (tau - f/k + sweep/2); compare converts.  Lines
-    that do not parse are skipped; other files are ignored."""
+    that do not parse are skipped; other files are ignored.  Symlinks,
+    non-regular files and files over MAX_JSONL_BYTES are skipped and logged
+    (this runs as root on files the codar-sounder account writes)."""
     return read_jsonl_rows(rows_dir, reporter_id=reporter_id, since_iso=since_iso,
                            until_iso=until_iso, require_table=False,
                            pattern="arrivals-????????.jsonl",

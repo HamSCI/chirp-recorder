@@ -217,10 +217,12 @@ def test_rowwriter_skips_spots_when_its_spots_writer_is_none(tmp_path):
     assert w.stats["spots_skipped"] == 2 and w.stats["sink_failures"] == 0
 
 
-def test_rows_jsonl_keeps_30_days_by_the_rows_own_day(tmp_path):
-    """compare reads this copy, so it keeps a stated window: files more than
-    ROWS_KEEP_DAYS before the day being written go at that day's first write.
-    The day comes from the rows, never the host clock."""
+def test_rows_jsonl_keeps_30_days_by_the_hosts_utc_date(tmp_path):
+    """compare reads this copy, so it keeps a stated window: files dated more
+    than ROWS_KEEP_DAYS before the host's UTC date go.  Pruning is
+    housekeeping, so it counts from the host clock, never from a row's label:
+    a label that jumps forward must never delete the archive."""
+    from datetime import date
     from chirp_recorder.core.writer import ROWS_KEEP_DAYS
     assert ROWS_KEEP_DAYS == 30
     d = tmp_path / "rows"
@@ -228,9 +230,11 @@ def test_rows_jsonl_keeps_30_days_by_the_rows_own_day(tmp_path):
     for day in ("2026-10-19", "2026-10-20", "2026-11-18"):
         (d / f"{day}.jsonl").write_text("{}\n")
     (d / "notes.txt").write_text("kept\n")
-    w = RowWriter(output_dir=tmp_path, sink_writers=None, phase_store=None)
-    cap, arrs = _rows()                                   # rows dated 2026-11-19
-    w.put(cap, arrs, [])
+    w = RowWriter(output_dir=tmp_path, sink_writers=None, phase_store=None,
+                  today=lambda: date(2026, 11, 19))
+    cap, arrs = _rows()
+    jumped = [dict(a, time="2027-11-19T01:02:03Z") for a in arrs]     # a label a year ahead
+    w.put(None, jumped, [])
     w.close()
     assert sorted(p.name for p in d.iterdir()) == [
-        "2026-10-20.jsonl", "2026-11-18.jsonl", "2026-11-19.jsonl", "notes.txt"]
+        "2026-10-20.jsonl", "2026-11-18.jsonl", "2027-11-19.jsonl", "notes.txt"]

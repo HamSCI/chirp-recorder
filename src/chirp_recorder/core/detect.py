@@ -446,9 +446,14 @@ def detect_group(samples: np.ndarray, *, fs: int, channel_centre_hz: float,
         else:
             # No usable Doppler: tau0.  Gated off (incoherent), the delay
             # still holds up to |f/k| of coupling, and the incoherent fit
-            # sizes f fairly: that bound joins the sigma.
+            # sizes f fairly: that bound joins the sigma.  Ambiguous (may
+            # alias), the true |f| is at least the alias limit 0.4/P, so the
+            # bound never falls below it.
             tau_ns = tau0_ns
-            if low:
+            if ambiguous:
+                f_bound = max(abs(dop_raw), DOPPLER_AMBIGUOUS / wf.period_s)
+                sigma = float(np.hypot(sigma, f_bound / abs(wf.rate_hz_per_s) * 1e9))
+            elif low:
                 sigma = float(np.hypot(sigma, coupling_ns))
         kept.append(c)
         arrivals.append(Arrival(

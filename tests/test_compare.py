@@ -415,19 +415,21 @@ def _coarse_case(d_ns, **kw):
 
 
 def test_a_coarse_cluster_7_us_off_at_0_15_hz_covers_and_leaves_matched_alone():
-    v = _coarse_case(7_000)                     # limit 5 + 1.5 * 5.83 = 13.7 us
+    v = _coarse_case(7_000)                     # limit 5 + 2.0 * 5.83 = 16.7 us
     by = {r.name: r for r in v.rows}
     assert v.status == "pass" and by["coverage"].value == 1.0
     assert len(v.matched) == 3 and by["matched"].value <= 5_000
     assert by["matched_coarse"].gating is False and by["matched_coarse"].passed is True
     assert by["matched_coarse"].value == 7_000
-    assert math.isclose(by["matched_coarse"].limit, 5_000 + 1.5 * 0.15 / 25_733.913 * 1e9)
+    # |1 - g| <= 2 for |g| <= 1 (real captures showed g down to -0.7)
+    assert math.isclose(by["matched_coarse"].limit, 5_000 + 2.0 * 0.15 / 25_733.913 * 1e9)
     (row,) = v.to_dict()["matched_coarse"]
     assert row[2] == 7_000 and row[4] == G
 
 
-def test_the_same_coarse_cluster_15_us_off_is_missed():
-    v = _coarse_case(15_000)
+def test_the_same_coarse_cluster_20_us_off_is_missed():
+    assert _coarse_case(15_000).status == "pass"        # inside 16.7 us with the 2.0 factor
+    v = _coarse_case(20_000)
     by = {r.name: r for r in v.rows}
     assert by["coverage"].value == 0.75 and by["coverage"].passed is False
     assert by["matched_coarse"].passed is False and v.status == "fail"
@@ -571,3 +573,73 @@ def test_codar_rows_sit_half_a_sweep_from_chirp_recorders():
             <= codar_bin_ns(K, 1.0) / 2
         (back,) = from_codar_convention([arrs[0]])
         assert abs(back["delay_ns"] - round(tau * 1e9)) <= codar_bin_ns(K, 1.0) / 2
+
+
+
+def test_the_half_sweep_correction_stops_at_the_fixed_codar_sounder_version(monkeypatch):
+    """CODAR_HALF_SWEEP_FIXED_FROM = None corrects every codar-sounder row.
+    Set to the first fixed release ("codar-sounder/X.Y.Z"), it leaves rows of
+    that release or later alone, so compare never corrects them twice."""
+    import chirp_recorder.core.compare as C
+    from chirp_recorder.core.compare import from_codar_convention
+    assert C.CODAR_HALF_SWEEP_FIXED_FROM is None
+    row = dict(rows("codar", [4_120_000], doppler_hz=0.0)[0], delay_ns=504_120_000)
+    old = dict(row, detector_version="codar-sounder/0.7.0")
+    new = dict(row, detector_version="codar-sounder/0.8.0")
+    odd = dict(row, detector_version="something-else")
+    assert [r["delay_ns"] for r in from_codar_convention([old, new, odd])] == [4_120_000] * 3
+    monkeypatch.setattr(C, "CODAR_HALF_SWEEP_FIXED_FROM", "codar-sounder/0.8.0")
+    got = [r["delay_ns"] for r in from_codar_convention(
+        [old, new, dict(row, detector_version="codar-sounder/0.10.1"), odd])]
+    assert got == [4_120_000, 504_120_000, 504_120_000, 4_120_000]
+
+
+# --- round 3: the readers run as root on files another account can write ----
+def _hostile_dir(tmp_path):
+    import os
+    d = tmp_path / "arrivals"
+    good = rows("codar", [4_120_000])
+    _write_codar_arrivals(d, good)                                    # arrivals-20261119.jsonl
+    os.symlink("/dev/zero", d / "arrivals-20261118.jsonl")           # endless bytes
+    os.mkfifo(d / "arrivals-20261117.jsonl")                         # would block on open
+    with open(d / "arrivals-20261116.jsonl", "wb") as fh:             # past the 64 MiB cap
+        fh.truncate(64 * 1024 * 1024 + 1)
+    with open(d / "arrivals-20261115.jsonl", "w") as fh:              # nesting past recursion
+        fh.write("[" * 200_000 + "\n" + json.dumps(good[0]) + "\n")
+    return d, good
+
+
+def test_the_codar_reader_skips_symlinks_fifos_oversized_files_and_deep_json(tmp_path, caplog):
+    import logging
+    import threading
+    from chirp_recorder.core.compare import MAX_JSONL_BYTES, read_codar_jsonl_rows
+    assert MAX_JSONL_BYTES == 64 * 1024 * 1024
+    d, good = _hostile_dir(tmp_path)
+    out = {}
+
+    def run():
+        out["rows"] = read_codar_jsonl_rows(d, reporter_id=REPORTER,
+                                            since_iso="2026-11-15T00:00:00Z",
+                                            until_iso="2026-11-20T00:00:00Z")
+    with caplog.at_level(logging.WARNING):
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(20)
+    assert not t.is_alive(), "the reader hung"
+    # the good file's six rows, plus the one row after the deep line
+    assert len(out["rows"]) == 7 and all(r in out["rows"] for r in good)
+    text = caplog.text
+    assert "arrivals-20261118.jsonl" in text and "arrivals-20261117.jsonl" in text
+    assert "arrivals-20261116.jsonl" in text
+
+
+def test_the_chirp_rows_reader_shares_the_hardening(tmp_path):
+    import os
+    from chirp_recorder.core.compare import read_jsonl_rows
+    d = tmp_path / "rows"
+    _write_jsonl(d, rows("chirp", [4_120_000]))
+    os.symlink("/dev/zero", d / "2026-11-18.jsonl")
+    os.mkfifo(d / "2026-11-17.jsonl")
+    got = read_jsonl_rows(d, reporter_id=REPORTER, since_iso="2026-11-15T00:00:00Z",
+                          until_iso="2026-11-20T00:00:00Z")
+    assert len(got) == 6

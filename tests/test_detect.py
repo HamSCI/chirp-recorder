@@ -465,3 +465,18 @@ def test_a_weak_neighbour_is_timed_with_the_strong_one_removed(synth):
     weak = [a for a in r.arrivals if a.tau_uncorrected_ns > 4_160_000]
     assert weak, [a.tau_ns for a in r.arrivals]
     assert abs(weak[0].tau_ns - round((0.00412 + 7.3 / 64_000) * 1e9)) < 300
+
+
+
+def test_an_ambiguous_row_carries_the_coupling_in_its_sigma(synth):
+    """R2-I1: an ambiguous Doppler (|f| > 0.4/P) skips the correction, so the
+    delay keeps g f/k of coupling, and the aliased value hides its size: the
+    bound never falls below the alias limit, max(|f_raw|, 0.4/P) / |k|."""
+    x = synth(fs=64_000, arrivals=[(0.043, 1.0)], seconds=30, doppler_hz=0.55)
+    (a,) = detect_group(x, fs=64_000, channel_centre_hz=4.463e6, group=GROUP_4463).arrivals
+    assert a.doppler_ambiguous is True and a.tau_ns == a.tau_zero_doppler_ns
+    snr = 10 ** (a.level_db / 10)
+    stat = 1e9 * np.sqrt(3) / (np.pi * WF_4463.bandwidth_hz() * np.sqrt(2 * snr * 30))
+    coupling = max(abs(a.doppler_raw_hz), 0.4 / WF_4463.period_s) / abs(K_4463) * 1e9
+    assert a.delay_sigma_ns == pytest.approx(np.hypot(stat, coupling))
+    assert a.delay_sigma_ns > 15_000
