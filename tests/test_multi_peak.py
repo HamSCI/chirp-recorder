@@ -356,6 +356,10 @@ class TestPipelineEmitsCh:
             realtime=False,
         )
         cpi, cpi_start_utc = next(iter(synth))
+        # The synthetic chirp crosses the centre at x[0], so its sweep starts
+        # half a sweep earlier.  Label x[0] half a second after the second:
+        # the sweep then starts on the second, the configured offset 0.
+        cpi_start_utc = cpi_start_utc.replace(microsecond=500_000)
         path, rows = pipeline.process_cpi(cpi, cpi_start_utc)
         try:
             assert path is not None, "no JSONL record written"
