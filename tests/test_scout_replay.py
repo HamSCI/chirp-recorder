@@ -27,6 +27,9 @@ def test_replay_finds_the_sigma_codar(capsys):
             if abs(abs(s["rate_hz_per_s"]) - CODAR_RATE_HZ_S) <= 0.02 * CODAR_RATE_HZ_S
             and s["period_s"] is not None and 0.9 <= s["period_s"] <= 1.1]
     assert hits, streaks
+    # The fixture guards R11: the CODAR as replayed passes the runner's min_fit.
+    from chirp_recorder.scout.runner import FINE
+    assert max(h["fit_score"] for h in hits) >= FINE.min_fit, hits
 
 
 def test_disabled_exits_zero(tmp_path, capsys):

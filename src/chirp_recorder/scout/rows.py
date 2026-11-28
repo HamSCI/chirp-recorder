@@ -69,18 +69,19 @@ def dwell_row(*, dwell: Dwell, start_utc: datetime, reporter_id: str,
 
 
 def screen(streaks: Sequence[Streak], published: Published, *,
-           nyquist_hz: Optional[float], min_sweeps: int
+           nyquist_hz: Optional[float], min_sweeps: int, min_fit: float
            ) -> tuple[list[tuple[Streak, str, dict]], dict[str, int]]:
     """Streaks that pass, each with its matched key and engineering tags, and
     counts of those dropped by reason.  A locally rejected streak passes: the
-    server records it as heard while rejected."""
+    server records it as heard while rejected.  ``min_fit`` goes to
+    ``persistent``; the runner passes 0.6, since SIGMA's CODAR fits 0.71."""
     kept: list[tuple[Streak, str, dict]] = []
     dropped = {"carrier": 0, "alias": 0, "not_persistent": 0}
     for s in streaks:
         why = artefact_reason(s, streaks, nyquist_hz=nyquist_hz)
         if why:
             dropped[why] += 1
-        elif not persistent(s, min_sweeps=min_sweeps):
+        elif not persistent(s, min_sweeps=min_sweeps, min_fit=min_fit):
             dropped["not_persistent"] += 1
         else:
             eng: dict = {}

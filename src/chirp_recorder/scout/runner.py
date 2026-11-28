@@ -3,7 +3,8 @@ that dwells window by window, and the rows both produce.
 
 Spectrum only, never IQ.  The coarse stream runs for the whole of ``run``;
 its dashes accumulate (dashes, never frames) and every ``coarse_window_s``
-go through the line search.  The fine stream opens once and retunes for
+(or sooner, once the window holds more than ``coarse_max_held`` dashes) go
+through the line search.  The fine stream opens once and retunes for
 each dwell.  Both callbacks fold each frame into its view at once, under a
 lock, so no frame is buffered.  A row's times come from radiod's
 ``gps_time`` when every frame of the dwell carries one, else from packet
@@ -42,17 +43,21 @@ TABLES = ("sweep", "scout_dwell")
 
 @dataclass(frozen=True)
 class ViewCost:
-    """What one view may spend: a frame with more than ``max_dashes`` dashes
-    is a burst; ``rate_max_hz_s`` bounds the line search's pairs.  The fine
-    view's caps keep a busy dwell under the unit's MemoryMax (R7: fine
-    dwells at >= 100 dashes a frame measured 664 MB to 2.5 GB)."""
+    """What one view may spend, and what it keeps.  A frame with more than
+    ``max_dashes`` dashes is a burst; ``rate_max_hz_s`` bounds the line
+    search's pairs (the fine view's 2e5 keeps a busy dwell under the unit's
+    MemoryMax).  A cap of 60 dropped a quarter of SIGMA's full-window frames
+    and with them the CODAR's 1 s period; 100 keeps it (R12).  min_fit 0.6:
+    SIGMA's CODAR fits 0.71 (R11)."""
     max_dashes: int
     rate_max_hz_s: float
     min_sweeps: int
+    min_fit: float
 
 
-FINE = ViewCost(max_dashes=60, rate_max_hz_s=2.0e5, min_sweeps=5)
-COARSE = ViewCost(max_dashes=100, rate_max_hz_s=2.0e6, min_sweeps=2)
+FINE = ViewCost(max_dashes=100, rate_max_hz_s=2.0e5, min_sweeps=5, min_fit=0.6)
+COARSE = ViewCost(max_dashes=100, rate_max_hz_s=2.0e6, min_sweeps=2, min_fit=0.6)
+COARSE_MAX_HELD = 300_000   # dashes a coarse window may hold before it closes early
 
 
 def clean_power(power_db) -> Optional[np.ndarray]:
@@ -322,9 +327,11 @@ class Scout:
                  now: Callable[[], float] = time.time,
                  monotonic: Callable[[], float] = time.monotonic,
                  utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-                 published_loader: Optional[Callable[[], Published]] = None):
+                 published_loader: Optional[Callable[[], Published]] = None,
+                 coarse_max_held: int = COARSE_MAX_HELD):
         self.s = settings
         self.reporter_id = reporter_id
+        self.coarse_max_held = int(coarse_max_held)
         self._control_factory = control_factory
         self._stream_factory = stream_factory
         self._write = writer
@@ -427,7 +434,7 @@ class Scout:
     # -- rows
 
     def _rows(self, acc: _Accum, *, start_utc: datetime, duration_s: float,
-              min_sweeps: int) -> tuple[list[dict], Optional[dict], list]:
+              cost: ViewCost) -> tuple[list[dict], Optional[dict], list]:
         """(sweep rows, dwell row, screened streaks); ([], None, []) for a
         dwell with fewer than min_frames frames."""
         d = acc.dwell
@@ -438,7 +445,7 @@ class Scout:
             return [], None, []
         found, frame_s, source, error = acc.streaks(guard=True)
         passed, dropped = screen(found, self.published, nyquist_hz=self.s.nyquist_hz,
-                                 min_sweeps=min_sweeps)
+                                 min_sweeps=cost.min_sweeps, min_fit=cost.min_fit)
         sweeps = []
         for s, key, eng in passed:
             sweeps.append(sweep_row(s, dwell=d, start_utc=start_utc,
@@ -481,7 +488,7 @@ class Scout:
         if self._stop.is_set():
             return [], None
         sweeps, row, _ = self._rows(acc, start_utc=start_utc, duration_s=self.s.dwell_s,
-                                 min_sweeps=FINE.min_sweeps)
+                                    cost=FINE)
         if row is None:
             self._fine_stale = True
         return sweeps, row
@@ -499,7 +506,7 @@ class Scout:
         if acc is None:
             return
         sweeps, row, passed = self._rows(acc, start_utc=start_utc, duration_s=t1 - t0,
-                                 min_sweeps=COARSE.min_sweeps)
+                                         cost=COARSE)
         if row is None:
             if self._coarse is not None and acc.counts["frames_received"] == 0:
                 log.warning("coarse stream silent for a window; opening it afresh")
@@ -522,6 +529,10 @@ class Scout:
             log.info("coarse streak at %.3f MHz, %.0f Hz/s: flagged for a fine dwell",
                      s.centre_hz / 1e6, s.rate_hz_per_s)
             self.cycle.flag(s.centre_hz, self._mono())
+
+    def _coarse_held(self) -> int:
+        with self._coarse_lock:
+            return 0 if self._coarse_acc is None else len(self._coarse_acc.dashes)
 
     def _refresh_published(self) -> None:
         now = self._mono()
@@ -556,8 +567,13 @@ class Scout:
                         self._write("sweep", r)
                     self._write("scout_dwell", row)
                 dwells += 1
-                if not stop.is_set() and self._mono() - self._coarse_t0 >= self.s.coarse_window_s:
-                    self._close_coarse_window()
+                if not stop.is_set():
+                    held = self._coarse_held()
+                    if held > self.coarse_max_held:
+                        log.warning("coarse window closed early at %d dashes", held)
+                        self._close_coarse_window()
+                    elif self._mono() - self._coarse_t0 >= self.s.coarse_window_s:
+                        self._close_coarse_window()
                 if max_dwells is not None and dwells >= max_dwells:
                     break
         finally:

@@ -384,3 +384,39 @@ def test_a_failing_line_search_still_writes_the_dwell_row(monkeypatch):
         Dwell("fine", 4.86e6, s.fine_span_hz, s.fine_bin_hz, "band"))
     assert sweeps == [] and dwell is not None and dwell["n_streaks"] == 0
     assert "ZeroDivisionError" in dwell["engineering"]["search_error"]
+
+
+def test_coarse_window_closes_early_when_it_holds_too_many_dashes(caplog):
+    s = ScoutSettings(enabled=True, status="x", nyquist_hz=16.0e6, coarse_bin_hz=4000.0,
+                      coarse_window_s=3600.0, targets_mhz=(4.86, 9.33), min_frames=50)
+    clock = Clock()
+    n_coarse = int(s.nyquist_hz / s.coarse_bin_hz)
+    rng = np.random.default_rng(3)
+
+    def script(st, f):
+        if st.view == "fine" or st is not world.coarse()[0]:
+            return []
+        return [(0.4, sweep_frame(rng, f0_hz=0.0, bin_hz=s.coarse_bin_hz, n_bins=n_coarse,
+                                  t_s=(i + 1) * 0.4, frame_s=0.4, rate=50_000.0,
+                                  lo=7.1e6, hi=7.5e6, period=10.0), None)
+                for i in range(160)]
+
+    rows: list = []
+    world = World(s, clock, script)
+    scout = make_scout(s, world, clock, rows, coarse_max_held=50)
+    with caplog.at_level(logging.WARNING):
+        scout.run(threading.Event(), max_dwells=1)
+    assert "coarse window closed early at" in caplog.text
+    assert any(t == "scout_dwell" and r["view"] == "coarse" for t, r in rows)
+    assert any(t == "sweep" and r["view"] == "coarse" for t, r in rows)
+    assert scout._coarse_held() == 0          # the new window holds none of the old dashes
+
+
+def test_coarse_window_runs_its_hour_below_the_threshold():
+    s = ScoutSettings(enabled=True, status="x", nyquist_hz=16.0e6, coarse_bin_hz=4000.0,
+                      coarse_window_s=3600.0, targets_mhz=(4.86, 9.33), min_frames=50)
+    clock = Clock()
+    rows: list = []
+    world = World(s, clock, lambda st, f: [])
+    make_scout(s, world, clock, rows).run(threading.Event(), max_dwells=2)
+    assert not any(t == "scout_dwell" and r["view"] == "coarse" for t, r in rows)

@@ -72,10 +72,10 @@ def test_screen_keeps_rejected_with_tag():
     s = streak()
     pub = Published((Signature(9.33e6, 1e5, 0.5, None, "g1"),),
                     (Signature(9.33e6, 1e5, 0.5, None, "r1"),), 0.0, "x")
-    kept, dropped = screen([s], pub, nyquist_hz=64.8e6, min_sweeps=5)
+    kept, dropped = screen([s], pub, nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.8)
     assert kept == [(s, "g1", {"local_reject": "r1"})]
     assert sum(dropped.values()) == 0
-    kept, _ = screen([s], Published((), (), None, "none"), nyquist_hz=None, min_sweeps=5)
+    kept, _ = screen([s], Published((), (), None, "none"), nyquist_hz=None, min_sweeps=5, min_fit=0.8)
     assert kept == [(s, "", {})]
 
 
@@ -84,11 +84,11 @@ def test_screen_drops_carriers_and_counts_them():
     weak = streak(centre=5e6, n=3)
     good = streak(centre=7e6)
     kept, dropped = screen([carrier, weak, good], Published((), (), None, "none"),
-                           nyquist_hz=64.8e6, min_sweeps=5)
+                           nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.8)
     assert [k[0] for k in kept] == [good]
     assert dropped == {"carrier": 1, "alias": 0, "not_persistent": 1}
     kept, dropped = screen([weak], Published((), (), None, "none"),
-                           nyquist_hz=64.8e6, min_sweeps=2)
+                           nyquist_hz=64.8e6, min_sweeps=2, min_fit=0.8)
     assert len(kept) == 1
 
 
@@ -96,7 +96,7 @@ def test_screen_counts_alias():
     strong = streak(centre=60e6, rate=1e5, snr=40.0)
     mirror = streak(centre=2 * 64.8e6 - 60e6, rate=-1e5, snr=10.0)
     kept, dropped = screen([strong, mirror], Published((), (), None, "none"),
-                           nyquist_hz=64.8e6, min_sweeps=5)
+                           nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.8)
     assert dropped["alias"] == 1 and [k[0] for k in kept] == [strong]
 
 
@@ -108,7 +108,16 @@ def _row(s):
 def test_screen_drops_a_streak_without_period():
     s = streak(n=9, period=None)
     kept, dropped = screen([s], Published((), (), None, "none"),
-                           nyquist_hz=64.8e6, min_sweeps=5)
+                           nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.8)
+    assert kept == [] and dropped["not_persistent"] == 1
+
+
+def test_screen_min_fit_passes_through():
+    s = streak(fit=0.7)
+    none = Published((), (), None, "none")
+    kept, _ = screen([s], none, nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.6)
+    assert [k[0] for k in kept] == [s]
+    kept, dropped = screen([s], none, nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.8)
     assert kept == [] and dropped["not_persistent"] == 1
 
 
