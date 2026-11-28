@@ -59,7 +59,11 @@ class ViewCost:
 
 FINE = ViewCost(max_dashes=100, rate_max_hz_s=2.0e5, min_sweeps=5, min_fit=0.6)
 COARSE = ViewCost(max_dashes=100, rate_max_hz_s=2.0e6, min_sweeps=2, min_fit=0.6)
-COARSE_MAX_HELD = 300_000   # dashes a coarse window may hold before it closes early
+# Dashes a coarse window may hold before it closes early.  Measured on
+# noise dashes (16 200 bins, 100 a frame): 100 000 peak 266 MB RSS, 110 000
+# 289 MB, 300 000 745 MB.  100 000 leaves room for the up to ~12 000 a
+# window gains during the dwell before the check runs.
+COARSE_MAX_HELD = 100_000
 
 
 def clean_power(power_db) -> Optional[np.ndarray]:
@@ -111,7 +115,8 @@ class _Accum:
             self.counts["frames_late"] += 1
             return
         freq = getattr(st, "frequency", None)
-        if freq is not None and abs(float(freq) - self.dwell.centre_hz) > self.dwell.bin_hz:
+        # Two bins: radiod may snap a spectrum channel's frequency.
+        if freq is not None and abs(float(freq) - self.dwell.centre_hz) > 2 * self.dwell.bin_hz:
             self.counts["frames_other_freq"] += 1
             return
         p = clean_power(getattr(st.spectrum, "bin_power_db", None))
@@ -472,7 +477,9 @@ class Scout:
     def run_dwell(self, dwell: Dwell) -> tuple[list[dict], Optional[dict]]:
         """Listen on the fine channel for dwell_s; return (sweep rows, dwell
         row or None).  A starved dwell returns ([], None) and the next dwell
-        opens the channel afresh."""
+        opens the channel afresh.  The centre is rounded to a whole number
+        of fine bins (a flagged centre is any float)."""
+        dwell = replace(dwell, centre_hz=round(dwell.centre_hz / dwell.bin_hz) * dwell.bin_hz)
         start_utc = self._utcnow()
         t0 = self._mono()
         acc = _Accum(dwell, FINE, settle_from=t0, deadline=t0 + self.s.dwell_s)
@@ -515,7 +522,7 @@ class Scout:
                 log.warning("coarse stream silent for a window; opening it afresh")
                 old, self._coarse = self._coarse, None
                 _stop_stream(old, "coarse")
-                self._open_coarse()
+                self._reopen_coarse()
             return
         for r in sweeps:
             self._write("sweep", r)
@@ -532,6 +539,14 @@ class Scout:
             log.info("coarse streak at %.3f MHz, %.0f Hz/s: flagged for a fine dwell",
                      s.centre_hz / 1e6, s.rate_hz_per_s)
             self.cycle.flag(s.centre_hz, self._mono())
+
+    def _reopen_coarse(self) -> None:
+        """Open the coarse stream again; a failure is logged and leaves it
+        closed, and the run loop tries again on its next pass."""
+        try:
+            self._open_coarse()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("coarse stream reopen failed (%s); retrying next pass", exc)
 
     def _coarse_held(self) -> int:
         with self._coarse_lock:
@@ -556,6 +571,8 @@ class Scout:
             self._refresh_published()
             self._open_coarse()
             while not stop.is_set():
+                if self._coarse is None:
+                    self._reopen_coarse()
                 self._refresh_published()
                 dwell = self.cycle.next(self.published, self._mono())
                 try:

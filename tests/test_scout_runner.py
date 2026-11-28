@@ -420,3 +420,75 @@ def test_coarse_window_runs_its_hour_below_the_threshold():
     world = World(s, clock, lambda st, f: [])
     make_scout(s, world, clock, rows).run(threading.Event(), max_dwells=2)
     assert not any(t == "scout_dwell" and r["view"] == "coarse" for t, r in rows)
+
+
+def test_a_failed_coarse_reopen_does_not_end_the_run():
+    """The coarse stream goes silent; its reopen raises once; a later pass
+    opens it, and run() carries on to its last dwell."""
+    s = ScoutSettings(enabled=True, status="x", nyquist_hz=16.0e6, coarse_bin_hz=4000.0,
+                      coarse_window_s=60.0, targets_mhz=(4.86, 9.33), min_frames=50)
+    clock = Clock()
+    world = World(s, clock, lambda st, f: [])
+    built = []
+
+    def stream(control, frequency_hz, bin_count, resolution_bw, *, poll_interval_sec,
+               on_spectrum):
+        st = World.stream(world, control, frequency_hz, bin_count, resolution_bw,
+                          poll_interval_sec=poll_interval_sec, on_spectrum=on_spectrum)
+        if st.view == "coarse":
+            built.append(st)
+            if len(built) == 2:
+                def boom():
+                    raise RuntimeError("radiod not back yet")
+                st.start = boom
+        return st
+
+    scout = Scout(s, "AC0G/T7", control_factory=world.control, stream_factory=stream,
+                  writer=lambda t, r: None, now=lambda: 1.795e9, monotonic=clock,
+                  utcnow=lambda: datetime(2026, 11, 28, 12, 0, tzinfo=timezone.utc),
+                  published_loader=lambda: EMPTY)
+    dwells = 6
+    scout.run(threading.Event(), max_dwells=dwells)
+    assert len(built) >= 3                          # silent, failed reopen, reopened
+    assert sum(len(x.tuned) for x in world.fine()) == dwells
+    assert all(x.stopped for x in world.streams)
+
+
+def test_fine_centres_round_to_whole_bins_and_snapped_frequency_is_kept():
+    """A flagged centre is any float; the runner tunes a whole number of fine
+    bins, and frames reporting a frequency 1.5 bins off still count."""
+    s = fine_settings(min_frames=20)
+    clock = Clock()
+    n_bins = int(s.fine_span_hz / s.fine_bin_hz)
+
+    def script(st, f):
+        return [(0.15, np.full(n_bins, -100.0), None)] * 100
+
+    class Snapped(FakeStream):
+        def _deliver(self):
+            self.tuned.append(self.freq)
+            for dt, power, gps in script(self, self.freq):
+                self.w.clock.t += dt
+                self.cb(SimpleNamespace(spectrum=SimpleNamespace(bin_power_db=power),
+                                        gps_time=gps, frequency=self.freq + 1.5 * self.rbw))
+            self.w.clock.t += self.w.s.dwell_s + 1.0
+
+    world = World(s, clock, script)
+
+    def stream(control, frequency_hz, bin_count, resolution_bw, *, poll_interval_sec,
+               on_spectrum):
+        st = Snapped(world, frequency_hz, bin_count, resolution_bw, on_spectrum)
+        world.streams.append(st)
+        return st
+
+    scout = Scout(s, "AC0G/T7", control_factory=world.control, stream_factory=stream,
+                  writer=lambda t, r: None, now=lambda: 1.795e9, monotonic=clock,
+                  utcnow=lambda: datetime(2026, 11, 28, 12, 0, tzinfo=timezone.utc),
+                  published_loader=lambda: EMPTY)
+    sweeps, dwell = scout.run_dwell(Dwell("fine", 7_298_012.3, s.fine_span_hz,
+                                          s.fine_bin_hz, "flag"))
+    tuned = world.fine()[0].tuned[0]
+    assert tuned / s.fine_bin_hz == round(tuned / s.fine_bin_hz)
+    assert abs(tuned - 7_298_012.3) <= s.fine_bin_hz / 2
+    assert dwell is not None and dwell["centre_hz"] == tuned
+    assert dwell["engineering"]["frames_other_freq"] == "0"
