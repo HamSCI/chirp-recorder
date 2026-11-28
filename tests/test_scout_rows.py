@@ -144,6 +144,26 @@ def test_screen_drops_a_subharmonic_twin():
     assert dropped["subharmonic"] == 1
 
 
+def test_screen_drops_sigmas_live_twin_with_a_wandering_rate():
+    """SIGMA 11-28, first fine dwell: the 2 s twin's rate sat 531 Hz/s (2.1 %)
+    off the 1 s streak's, past the source-match tolerance."""
+    def st(centre, rate, period):
+        return Streak(centre, 22800.0, rate, period, None, 9.5, 13, 0.7, False, (0.0, 1.0))
+    short = st(5262675.0, -25746.6, 1.0005)
+    long = st(5263125.0, -26277.6, 1.9986)
+    kept, dropped = screen([short, long], Published((), (), None, "none"),
+                           nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.6)
+    assert [k[0] for k in kept] == [short] and dropped["subharmonic"] == 1
+
+
+def test_screen_keeps_a_twice_period_streak_of_another_rate():
+    a = streak(centre=5.2631e6, rate=-25920.0, period=1.0)
+    b = streak(centre=5.2631e6, rate=-51840.0, period=2.0)
+    kept, dropped = screen([a, b], Published((), (), None, "none"),
+                           nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.6)
+    assert len(kept) == 2 and dropped["subharmonic"] == 0
+
+
 def test_screen_keeps_a_non_integer_period_ratio():
     a = streak(centre=5.2631e6, rate=-25920.0, period=1.0)
     b = streak(centre=5.2631e6, rate=-25920.0, period=1.5)

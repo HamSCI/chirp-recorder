@@ -10,8 +10,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence
 
-from hamsci_dsp.chirp.scout_screen import (Signature, artefact_reason, match_key,
-                                           persistent, reject_match)
+from hamsci_dsp.chirp.scout_screen import (artefact_reason, match_key, persistent,
+                                           reject_match)
 from hamsci_dsp.chirp.streaks import Streak
 
 from chirp_recorder.scout.plan import Dwell
@@ -19,6 +19,11 @@ from chirp_recorder.scout.published import Published
 
 SUBHARMONIC_K = (2, 3, 4)
 SUBHARMONIC_TOL = 0.01
+# A twin fits every other sweep, so its rate wanders more than a source
+# match allows: SIGMA's 5.263 MHz CODAR, 11-28, gave -25747 Hz/s at 1.0005 s
+# and -26278 Hz/s (2.1 % off, past match_key's 500 Hz/s) at 1.9986 s.
+SUBHARMONIC_RATE_TOL = 0.05
+SUBHARMONIC_CENTRE_FRAC = 0.25
 
 DETECTOR_VERSION = "scout-1"
 SCHEMA_VERSION = 1
@@ -107,16 +112,21 @@ def screen(streaks: Sequence[Streak], published: Published, *,
 
 
 def _subharmonic(s: Streak, others: Sequence[Streak]) -> bool:
-    """True when another streak matches s on centre, rate and span (the
-    signature match with no period) and s's period is k = 2, 3 or 4 times
-    that streak's, within 1 % of s's period."""
+    """True when another streak with a shorter period shares s's sweep: rate
+    of the same sign within SUBHARMONIC_RATE_TOL of the larger, centres within
+    SUBHARMONIC_CENTRE_FRAC of the wider span; and s's period is k = 2, 3 or 4
+    times that streak's, within 1 % of s's period."""
     if s.period_s is None:
         return False
     for o in others:
         if o is s or o.period_s is None or o.period_s >= s.period_s:
             continue
-        sig = Signature(o.centre_hz, o.rate_hz_per_s, None, o.span_hz, "o")
-        if not match_key(s, (sig,)):
+        if (s.rate_hz_per_s > 0) != (o.rate_hz_per_s > 0):
+            continue
+        big = max(abs(s.rate_hz_per_s), abs(o.rate_hz_per_s))
+        if abs(s.rate_hz_per_s - o.rate_hz_per_s) > SUBHARMONIC_RATE_TOL * big:
+            continue
+        if abs(s.centre_hz - o.centre_hz) > SUBHARMONIC_CENTRE_FRAC * max(s.span_hz, o.span_hz):
             continue
         if any(abs(s.period_s - k * o.period_s) <= SUBHARMONIC_TOL * s.period_s
                for k in SUBHARMONIC_K):
