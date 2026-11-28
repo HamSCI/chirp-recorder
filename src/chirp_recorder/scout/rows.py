@@ -38,10 +38,13 @@ def _eng(d: dict) -> dict:
 
 def sweep_row(s: Streak, *, dwell: Dwell, start_utc: datetime, reporter_id: str,
               frame_s: float, matched_key: str, engineering: dict) -> dict:
+    if s.period_s is None:
+        raise ValueError("a streak without a period cannot make a sweep row: "
+                         "sigmondb.sweep.period_s is not nullable")
     return {
         "time": _iso(start_utc), "reporter_id": reporter_id, "view": dwell.view,
         "centre_hz": float(s.centre_hz), "span_hz": float(s.span_hz),
-        "rate_hz_per_s": float(s.rate_hz_per_s), "period_s": _f(s.period_s),
+        "rate_hz_per_s": float(s.rate_hz_per_s), "period_s": float(s.period_s),
         "duration_s": _f(s.duration_s), "snr_db": float(s.snr_db),
         "n_sweeps": int(s.n_sweeps), "fit_score": _f(s.fit_score),
         "clipped": bool(s.clipped), "matched_key": matched_key,

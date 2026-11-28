@@ -9,7 +9,6 @@ windows centred on published chirps no target window covers.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from chirp_recorder.scout.published import Published
 from chirp_recorder.scout.settings import ScoutSettings
@@ -67,7 +66,7 @@ class DwellCycle:
             return self._dwell(centre, "flag")
         targets = [t * 1e6 for t in self._s.targets_mhz]
         chirps = self._chirp_windows(published)
-        take_target = self._want_target and bool(targets) or not chirps
+        take_target = (self._want_target and bool(targets)) or not chirps
         self._want_target = not take_target
         if take_target:
             c = targets[self._ti % len(targets)]

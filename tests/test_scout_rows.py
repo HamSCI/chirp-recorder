@@ -98,3 +98,26 @@ def test_screen_counts_alias():
     kept, dropped = screen([strong, mirror], Published((), (), None, "none"),
                            nyquist_hz=64.8e6, min_sweeps=5)
     assert dropped["alias"] == 1 and [k[0] for k in kept] == [strong]
+
+
+def _row(s):
+    return sweep_row(s, dwell=D, start_utc=T0, reporter_id="x", frame_s=0.15,
+                     matched_key="", engineering={})
+
+
+def test_screen_drops_a_streak_without_period():
+    s = streak(n=9, period=None)
+    kept, dropped = screen([s], Published((), (), None, "none"),
+                           nyquist_hz=64.8e6, min_sweeps=5)
+    assert kept == [] and dropped["not_persistent"] == 1
+
+
+def test_sweep_row_refuses_missing_period():
+    with pytest.raises(ValueError, match="period"):
+        _row(streak(period=None))
+
+
+def test_sweep_row_allows_missing_duration():
+    r = _row(streak())
+    assert r["duration_s"] is None
+    assert json.loads(json.dumps(r))["duration_s"] is None
