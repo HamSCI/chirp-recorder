@@ -87,7 +87,7 @@ def test_screen_drops_carriers_and_counts_them():
                            nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.8)
     assert [k[0] for k in kept] == [good]
     assert dropped == {"carrier": 1, "alias": 0, "not_persistent": 1,
-                       "subharmonic": 0}
+                       "subharmonic": 0, "narrow": 0}
     kept, dropped = screen([weak], Published((), (), None, "none"),
                            nyquist_hz=64.8e6, min_sweeps=2, min_fit=0.8)
     assert len(kept) == 1
@@ -158,3 +158,17 @@ def test_screen_keeps_a_twice_period_streak_elsewhere():
     kept, dropped = screen([a, b], Published((), (), None, "none"),
                            nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.6)
     assert len(kept) == 2 and dropped["subharmonic"] == 0
+
+
+def test_screen_drops_a_narrow_streak():
+    narrow = Streak(5.3595e6, 5000.0, -760.0, 0.58, None, 26.0, 11, 0.9, False, (0.0,))
+    kept, dropped = screen([narrow], Published((), (), None, "none"),
+                           nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.6)
+    assert kept == [] and dropped["narrow"] == 1 and dropped["not_persistent"] == 0
+
+
+def test_screen_keeps_a_codar_wide_streak():
+    codar = Streak(4.4626e6, 25_700.0, -25_730.0, 1.0, None, 17.0, 11, 0.69, False, (0.0,))
+    kept, dropped = screen([codar], Published((), (), None, "none"),
+                           nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.6, min_span_hz=10_000.0)
+    assert [k[0] for k in kept] == [codar] and dropped["narrow"] == 0

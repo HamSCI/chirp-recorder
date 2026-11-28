@@ -48,11 +48,13 @@ class ViewCost:
     search's pairs (the fine view's 2e5 keeps a busy dwell under the unit's
     MemoryMax).  A cap of 60 dropped a quarter of SIGMA's full-window frames
     and with them the CODAR's 1 s period; 100 keeps it (R12).  min_fit 0.6:
-    SIGMA's CODAR fits 0.71 (R11)."""
+    SIGMA's CODAR fits 0.71 (R11).  min_span_hz 10 kHz: narrower streaks
+    were SIGMA's drifting carriers (R16)."""
     max_dashes: int
     rate_max_hz_s: float
     min_sweeps: int
     min_fit: float
+    min_span_hz: float = 10_000.0
 
 
 FINE = ViewCost(max_dashes=100, rate_max_hz_s=2.0e5, min_sweeps=5, min_fit=0.6)
@@ -445,7 +447,8 @@ class Scout:
             return [], None, []
         found, frame_s, source, error = acc.streaks(guard=True)
         passed, dropped = screen(found, self.published, nyquist_hz=self.s.nyquist_hz,
-                                 min_sweeps=cost.min_sweeps, min_fit=cost.min_fit)
+                                 min_sweeps=cost.min_sweeps, min_fit=cost.min_fit,
+                                 min_span_hz=cost.min_span_hz)
         sweeps = []
         for s, key, eng in passed:
             sweeps.append(sweep_row(s, dwell=d, start_utc=start_utc,

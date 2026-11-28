@@ -30,6 +30,8 @@ def test_replay_finds_the_sigma_codar(capsys):
     # The fixture guards R11: the CODAR as replayed passes the runner's min_fit.
     from chirp_recorder.scout.runner import FINE
     assert max(h["fit_score"] for h in hits) >= FINE.min_fit, hits
+    # ... and R16: it is wider than the runner's min_span_hz.
+    assert all(h["span_hz"] >= FINE.min_span_hz for h in hits), hits
 
 
 def test_disabled_exits_zero(tmp_path, capsys):

@@ -72,21 +72,27 @@ def dwell_row(*, dwell: Dwell, start_utc: datetime, reporter_id: str,
 
 
 def screen(streaks: Sequence[Streak], published: Published, *,
-           nyquist_hz: Optional[float], min_sweeps: int, min_fit: float
+           nyquist_hz: Optional[float], min_sweeps: int, min_fit: float,
+           min_span_hz: float = 10_000.0
            ) -> tuple[list[tuple[Streak, str, dict]], dict[str, int]]:
     """Streaks that pass, each with its matched key and engineering tags, and
     counts of those dropped by reason.  A locally rejected streak passes: the
     server records it as heard while rejected.  ``min_fit`` goes to
     ``persistent``; the runner passes 0.6, since SIGMA's CODAR fits 0.71.
+    A streak narrower than ``min_span_hz`` goes as "narrow": at min_fit 0.6
+    SIGMA's drifting carriers (1-4 kHz wide) passed as slow sweeps.
     Last, a streak that repeats another's centre and rate at 2, 3 or 4
     times its period (the same source, every other sweep) goes as
     "subharmonic"."""
     kept: list[tuple[Streak, str, dict]] = []
-    dropped = {"carrier": 0, "alias": 0, "not_persistent": 0, "subharmonic": 0}
+    dropped = {"carrier": 0, "alias": 0, "not_persistent": 0, "subharmonic": 0,
+               "narrow": 0}
     for s in streaks:
         why = artefact_reason(s, streaks, nyquist_hz=nyquist_hz)
         if why:
             dropped[why] += 1
+        elif s.span_hz < min_span_hz:
+            dropped["narrow"] += 1
         elif not persistent(s, min_sweeps=min_sweeps, min_fit=min_fit):
             dropped["not_persistent"] += 1
         else:
