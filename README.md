@@ -41,7 +41,8 @@ sends them to wd30 through the `chirp-sigmondb-sweep` and
 `chirp-sigmondb-scout-dwell` pipelines.
 
 It costs radiod one coarse and one fine spectrum channel. On SIGMA that came to
-7.9 % of a core. The unit itself runs at `Nice=10` under `CPUQuota=20%`.
+7.9 % of a core (measured 2026-11-19 on AC0G-SIGMA for one coarse plus one
+fine spectrum channel). The unit itself runs at `Nice=10` under `CPUQuota=20%`.
 
 It is off by default. To turn it on, set `enabled = true` in the `[scout]` table
 of `/etc/chirp-recorder/<KEY>.toml`, then start `chirp-scout@<KEY>.service`.

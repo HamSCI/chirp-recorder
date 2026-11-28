@@ -38,9 +38,9 @@ transmitters = ["AGL1"]
 # tdma_offset_samples = { AGL1 = 0 }
 
 # The scout watches radiod's spectrum (never IQ) for chirp sweeps and sends
-# sweep and scout_dwell rows.  Off by default.  Uncomment to tune; every key shown
-# holds its default.  status and state_dir fall back to the first [[channel]]'s
-# status and <output_dir>/scout.
+# sweep and scout_dwell rows.  Off by default.  Uncomment to tune; every key shows
+# its default except state_dir, whose default is <output_dir>/scout and which is
+# shown as an example.  status "" falls back to the first [[channel]]'s status.
 # [scout]
 # # false: the unit exits 0 at once.  true starts the watch.
 # enabled = false
@@ -52,7 +52,7 @@ transmitters = ["AGL1"]
 # coarse_bin_hz = 4000.0
 # # seconds between coarse spectrum polls.
 # coarse_poll_s = 0.4
-# # seconds of coarse history the line search keeps.
+# # seconds between line searches over the accumulated coarse dashes; the window closes early past 100 000 dashes.
 # coarse_window_s = 3600.0
 # # width of each fine window, Hz.
 # fine_span_hz = 2000000.0

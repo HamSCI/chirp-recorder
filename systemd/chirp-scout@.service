@@ -47,6 +47,8 @@ ReadWritePaths=/var/lib/chirp-recorder /var/log/chirp-recorder
 # The sink: sweep and scout_dwell rows.  The "-" lets a host without sigmond
 # or hs-uploader start anyway.
 ReadWritePaths=-/var/lib/hs-uploader -/var/lib/sigmond
+# No -/run/hf-timestd: the scout reads no timing state.  Frame times come from
+# radiod's gps_time or the monotonic clock.
 ReadOnlyPaths=/etc/chirp-recorder
 PrivateNetwork=false
 
