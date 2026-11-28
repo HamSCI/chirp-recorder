@@ -10,7 +10,9 @@ CHIRPS = (b'{"group_key":"g1","centre_mhz":4.463,"rate_khz_s":-100.0,'
           b'"period_s":0.5,"span_khz":50.0}\n'
           b'{"group_key":"g2","centre_mhz":9.33,"rate_khz_s":25.0,'
           b'"period_s":null,"span_khz":null}\n')
-REJECTS = (b'{"chirp_id":"r1","centre_mhz":13.5,"rate_khz_s":10.0,'
+REJECTS = (b'{"reporter_id":"AC0G/T7","chirp_id":"r1","centre_mhz":13.5,"rate_khz_s":10.0,'
+           b'"period_s":1.0,"span_khz":null}\n'
+           b'{"reporter_id":"OTHER/1","chirp_id":"r9","centre_mhz":9.0,"rate_khz_s":10.0,'
            b'"period_s":1.0,"span_khz":null}\n')
 
 
@@ -45,41 +47,41 @@ def test_parses_hosts_in_order(tmp_path):
 
 def test_host_answers_only_when_both_queries_parse(tmp_path):
     f = Fake({"https://a": (CHIRPS, b"not json\n"), "https://b": (CHIRPS, REJECTS)})
-    p = load_published(tmp_path, ["https://a", "https://b"], "X/1", fetch=f)
+    p = load_published(tmp_path, ["https://a", "https://b"], "AC0G/T7", fetch=f)
     assert p.source == "https://b"
 
 
 def test_unreachable_hosts_use_cache_then_empty(tmp_path, caplog):
     ok = Fake({"https://a": (CHIRPS, REJECTS)})
-    load_published(tmp_path, ["https://a"], "X/1", fetch=ok, now=lambda: 500.0)
+    load_published(tmp_path, ["https://a"], "AC0G/T7", fetch=ok, now=lambda: 500.0)
     bad = Fake({"https://a": OSError("secret body")})
     with caplog.at_level("WARNING"):
-        p = load_published(tmp_path, ["https://a"], "X/1", fetch=bad, now=lambda: 900.0)
+        p = load_published(tmp_path, ["https://a"], "AC0G/T7", fetch=bad, now=lambda: 900.0)
     assert p.source == "cache" and p.fetched_at == 500.0
     assert [s.key for s in p.chirps] == ["g1", "g2"] and p.rejects[0].key == "r1"
     assert "https://a" in caplog.text and "OSError" in caplog.text
     assert "secret body" not in caplog.text
     (tmp_path / "published.json").unlink()
-    p = load_published(tmp_path, ["https://a"], "X/1", fetch=bad)
+    p = load_published(tmp_path, ["https://a"], "AC0G/T7", fetch=bad)
     assert p == Published((), (), None, "none")
 
 
 def test_corrupt_cache_counts_as_none(tmp_path, caplog):
     (tmp_path / "published.json").write_text("{oops")
     bad = Fake({"https://a": OSError("x")})
-    p = load_published(tmp_path, ["https://a"], "X/1", fetch=bad)
+    p = load_published(tmp_path, ["https://a"], "AC0G/T7", fetch=bad)
     assert p == Published((), (), None, "none")
 
 
-def test_reporter_id_is_a_parameter(tmp_path):
+def test_rejects_are_filtered_here_not_by_a_query_parameter(tmp_path):
+    """The public hosts drop param_*; the station filters the rejects itself."""
     f = Fake({"https://a": (CHIRPS, REJECTS)})
-    load_published(tmp_path, ["https://a"], "AC0G/T7", fetch=f)
-    chirp_url, rej_url = f.urls
-    assert "param_reporter_id" not in chirp_url
-    q = parse_qs(urlparse(rej_url).query)
-    assert q["param_reporter_id"] == ["AC0G/T7"]
-    assert "{reporter_id:String}" in q["query"][0] and "AC0G" not in q["query"][0]
-    assert "AC0G%2FT7" in rej_url
+    p = load_published(tmp_path, ["https://a"], "AC0G/T7", fetch=f)
+    assert not any("param_" in u for u in f.urls)
+    assert "AC0G" not in f.urls[1]
+    assert [s.key for s in p.rejects] == ["r1"]
+    other = load_published(tmp_path, ["https://a"], "NOBODY/1", fetch=f)
+    assert other.rejects == () and other.source == "https://a"
 
 
 def test_https_get_rejects_other_schemes():
@@ -97,5 +99,5 @@ def test_a_non_finite_number_fails_the_host(tmp_path):
            b'"period_s":Infinity,"span_khz":null}\n')
     f = Fake({"https://a": (nan, REJECTS), "https://b": (CHIRPS, inf),
               "https://c": (CHIRPS, REJECTS)})
-    p = load_published(tmp_path, ["https://a", "https://b", "https://c"], "X/1", fetch=f)
+    p = load_published(tmp_path, ["https://a", "https://b", "https://c"], "AC0G/T7", fetch=f)
     assert p.source == "https://c"

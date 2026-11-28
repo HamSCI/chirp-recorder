@@ -27,9 +27,12 @@ CHIRPS_SQL = ("SELECT group_key, centre_mhz, rate_khz_s, period_s, span_khz "
               "FROM sigmondb_public.chirps "
               "WHERE state IN ('established','dormant','candidate','probing') "
               "FORMAT JSONEachRow")
-REJECTS_SQL = ("SELECT chirp_id, centre_mhz, rate_khz_s, period_s, span_khz "
-               "FROM sigmondb_public.chirp_reject_local "
-               "WHERE reporter_id = {reporter_id:String} FORMAT JSONEachRow")
+# Every station's rejects; load_published keeps this station's.  The public
+# hosts drop ClickHouse query parameters (param_reporter_id came back
+# "Substitution `reporter_id` is not set" on SIGMA, 11-28), and a reporter id
+# spliced into the SQL would need quoting rules of its own.
+REJECTS_SQL = ("SELECT reporter_id, chirp_id, centre_mhz, rate_khz_s, period_s, span_khz "
+               "FROM sigmondb_public.chirp_reject_local FORMAT JSONEachRow")
 
 
 @dataclass(frozen=True)
@@ -52,12 +55,15 @@ def _scaled(v, k: float) -> Optional[float]:
     return None if v is None else float(v) * k
 
 
-def _parse(body: bytes, key_field: str) -> tuple:
+def _parse(body: bytes, key_field: str, reporter_id: Optional[str] = None) -> tuple:
+    """Signatures from JSONEachRow; with reporter_id, only that reporter's rows."""
     out = []
     for line in body.decode("utf-8").splitlines():
         if not line.strip():
             continue
         r = json.loads(line)
+        if reporter_id is not None and r["reporter_id"] != reporter_id:
+            continue
         sig = Signature(
             centre_hz=float(r["centre_mhz"]) * 1e6,
             rate_hz_per_s=float(r["rate_khz_s"]) * 1e3,
@@ -121,10 +127,8 @@ def load_published(state_dir: Path, hosts: Sequence[str], reporter_id: str, *,
         try:
             chirps = _parse(fetch(f"{base}/?query={quote(CHIRPS_SQL, safe='')}",
                                   timeout_s), "group_key")
-            rejects = _parse(fetch(
-                f"{base}/?query={quote(REJECTS_SQL, safe='')}"
-                f"&param_reporter_id={quote(reporter_id, safe='')}",
-                timeout_s), "chirp_id")
+            rejects = _parse(fetch(f"{base}/?query={quote(REJECTS_SQL, safe='')}",
+                                   timeout_s), "chirp_id", reporter_id)
         except Exception as e:      # any failure: try the next host
             log.warning("published chirps: host %s failed (%s)", host, type(e).__name__)
             continue
