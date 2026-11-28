@@ -96,7 +96,7 @@ wheels = [
 
 [[package]]
 name = "hamsci-dsp"
-version = "0.10.0"
+version = "0.11.0"
 source = { editable = "../hamsci-dsp" }
 dependencies = [
     { name = "geographiclib" },
@@ -107,14 +107,14 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "apexpy", marker = "extra == 'geomag'", specifier = ">=2.0" },
     { name = "geographiclib", specifier = ">=2.0" },
     { name = "iri2020", marker = "extra == 'iono'", specifier = ">=1.7" },
     { name = "numpy", specifier = ">=1.24.0" },
-    { name = "pylap", marker = "extra == 'raytrace'" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "scipy", marker = "extra == 'dev'", specifier = ">=1.10" },
+    { name = "scipy", marker = "extra == 'tomography'", specifier = ">=1.10" },
 ]
-provides-extras = ["dev", "iono", "raytrace", "geomag"]
+provides-extras = ["dev", "tomography", "iono"]
 
 [[package]]
 name = "hs-uploader"
@@ -144,7 +144,7 @@ wheels = [
 
 [[package]]
 name = "ka9q-python"
-version = "3.27.0"
+version = "3.29.0"
 source = { editable = "../ka9q-python" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },

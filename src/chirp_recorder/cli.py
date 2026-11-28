@@ -1,5 +1,5 @@
 """chirp-recorder command line: daemon, inventory, validate, version, status,
-stations, config init|edit, replay, compare.
+stations, config init|edit, replay, compare, scout, scout-replay.
 
 The sigmond unit runs `python -m chirp_recorder.cli daemon --instance %i`.
 Every JSON subcommand keeps stdout to the JSON alone; logs go to stderr.
@@ -270,6 +270,67 @@ def _handle_compare(args) -> int:
     return 0 if v.status == "pass" else 1
 
 
+def _handle_scout(args) -> int:
+    import signal
+    import threading
+    from chirp_recorder.config import ConfigError, load_instance
+    from chirp_recorder.scout import runner
+    from chirp_recorder.scout.settings import scout_settings
+    _setup_logging(True)
+    try:
+        cfg = load_instance(_safe_key(args.key), _etc(args))
+        settings = scout_settings(cfg)
+    except ConfigError as exc:
+        print(f"chirp-recorder: {exc}", file=sys.stderr)
+        return 1
+    if not settings.enabled:
+        print(f"{cfg.key}: scout disabled ([scout] enabled = false)")
+        return 0
+    if args.dry_run:
+        def writer(table, row):
+            print(json.dumps({"table": table, "row": row}, separators=(",", ":")),
+                  flush=True)
+        close = None
+    else:
+        writer = runner.make_scout_writer(settings.state_dir)
+        close = writer.close
+    stop = threading.Event()
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: stop.set())
+    try:
+        runner.Scout(settings, cfg.reporter_id, writer=writer).run(stop, max_dwells=args.dwells)
+    finally:
+        if close is not None:
+            close()
+    return 0
+
+
+def _handle_scout_replay(args) -> int:
+    import numpy as np
+    from chirp_recorder.scout.runner import replay
+    _setup_logging(False)
+    with np.load(args.file) as z:
+        power = np.asarray(z["power_db"], dtype=float)
+        t_s = np.asarray(z["t_s"], dtype=float)
+        f0 = args.f0_hz if args.f0_hz is not None else float(z["f0_hz"]) if "f0_hz" in z else None
+        bin_hz = (args.bin_hz if args.bin_hz is not None
+                  else float(z["bin_hz"]) if "bin_hz" in z else None)
+    if f0 is None or bin_hz is None:
+        print("chirp-recorder: the file holds no f0_hz or bin_hz; pass --f0-hz and --bin-hz",
+              file=sys.stderr)
+        return 2
+    for s in replay(power, t_s, f0_hz=f0, bin_hz=bin_hz, view=args.view):
+        print(json.dumps({"centre_hz": round(s.centre_hz, 1), "span_hz": round(s.span_hz, 1),
+                          "rate_hz_per_s": round(s.rate_hz_per_s, 1),
+                          "period_s": None if s.period_s is None else round(s.period_s, 4),
+                          "duration_s": None if s.duration_s is None else round(s.duration_s, 4),
+                          "n_sweeps": s.n_sweeps, "fit_score": round(s.fit_score, 3),
+                          "snr_db": round(s.snr_db, 1), "clipped": s.clipped},
+                         separators=(",", ":")))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="chirp-recorder")
     parser.add_argument("--etc", help="Per-instance config directory "
@@ -338,6 +399,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mean-offset", action="store_true",
                    help="Gate on |mean(chirp - codar)| <= 5 us over >= 20 matched clusters")
     p.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("scout", help="Watch radiod's spectrum for chirp sweeps")
+    p.add_argument("key", help="Instance key (AC0G-B4)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Print rows to stdout as JSON lines; write no sink and no JSONL")
+    p.add_argument("--dwells", type=int, help="Stop after N fine dwells")
+
+    p = sub.add_parser("scout-replay", help="Run the scout's line search on a saved waterfall")
+    p.add_argument("file", help=".npz with power_db (frames x bins), t_s, f0_hz, bin_hz")
+    p.add_argument("--bin-hz", type=float, help="Bin width (default: the file's bin_hz)")
+    p.add_argument("--f0-hz", type=float, help="Bin 0's frequency (default: the file's f0_hz)")
+    p.add_argument("--view", choices=("fine", "coarse"), default="fine",
+                   help="Whose caps to apply (default fine)")
     return parser
 
 
@@ -345,7 +419,8 @@ _HANDLERS = {"version": _handle_version, "daemon": _handle_daemon,
              "inventory": _handle_inventory, "validate": _handle_validate,
              "status": _handle_status, "stations": _handle_stations,
              "config": _handle_config, "replay": _handle_replay,
-             "compare": _handle_compare}
+             "compare": _handle_compare, "scout": _handle_scout,
+             "scout-replay": _handle_scout_replay}
 
 
 def main(argv=None) -> int:
