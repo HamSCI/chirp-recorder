@@ -668,6 +668,35 @@ def test_cli_returns_one_on_a_config_contradiction(tmp_path, monkeypatch):
     assert main(["--etc", str(tmp_path), "scout", "AC0G-T7", "--dry-run"]) == 1
 
 
+def test_cli_scout_quiets_ka9q_spectrum_polls(tmp_path, monkeypatch):
+    """ka9q.control logs each poll at INFO (~31 000 lines an hour on SIGMA);
+    scout mode raises that logger to WARNING unless the run asks for DEBUG."""
+    import chirp_recorder.scout.runner as runner
+    from chirp_recorder.cli import main
+    from tests.test_scout_settings import cfg_for
+    cfg_for(tmp_path, '\n[scout]\nenabled = true\n')
+    seen = []
+
+    class Probe:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, stop, max_dwells=None):
+            seen.append(logging.getLogger("ka9q.control").isEnabledFor(logging.INFO))
+
+    monkeypatch.setattr(runner, "Scout", Probe)
+    ka9q = logging.getLogger("ka9q.control")
+    monkeypatch.setattr(ka9q, "level", logging.NOTSET)
+    monkeypatch.setattr(logging.getLogger(), "level", logging.INFO)
+    monkeypatch.delenv("CHIRP_RECORDER_LOG_LEVEL", raising=False)
+    monkeypatch.delenv("CLIENT_LOG_LEVEL", raising=False)
+    assert main(["--etc", str(tmp_path), "scout", "AC0G-T7", "--dry-run"]) == 0
+    ka9q.setLevel(logging.NOTSET)
+    logging.getLogger().setLevel(logging.DEBUG)
+    assert main(["--etc", str(tmp_path), "scout", "AC0G-T7", "--dry-run"]) == 0
+    assert seen == [False, True]
+
+
 def test_coarse_flags_are_capped_and_deduplicated():
     from hamsci_dsp.chirp.streaks import Streak
     s = coarse_settings()

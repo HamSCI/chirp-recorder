@@ -35,6 +35,14 @@ def _setup_logging(daemon: bool) -> None:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
+def _quiet_spectrum_polls() -> None:
+    """ka9q.control logs every spectrum poll at INFO: about 31 000 lines an
+    hour from the scout's two channels (SIGMA, 11-28).  Keep its warnings;
+    a DEBUG run still sees every poll."""
+    if logging.getLogger().getEffectiveLevel() >= logging.INFO:
+        logging.getLogger("ka9q.control").setLevel(logging.WARNING)
+
+
 def _keys(args) -> list[str]:
     """The instances in scope: --instance, else SIGMOND_INSTANCE when its file
     exists, else every file in etc."""
@@ -277,6 +285,7 @@ def _handle_scout(args) -> int:
     from chirp_recorder.scout import runner
     from chirp_recorder.scout.settings import scout_settings
     _setup_logging(True)
+    _quiet_spectrum_polls()
     try:
         cfg = load_instance(_safe_key(args.key), _etc(args))
         settings = scout_settings(cfg)
