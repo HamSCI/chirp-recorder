@@ -1,0 +1,57 @@
+[Unit]
+Description=chirp-recorder scout (radiod spectrum watch for chirp sweeps) for %i
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+# The scout does not call sd_notify, so Type=simple and no watchdog.
+Type=simple
+User=chirprec
+Group=chirprec
+
+EnvironmentFile=-/etc/sigmond/coordination.env
+EnvironmentFile=-/etc/chirp-recorder/env/%i.env
+
+WorkingDirectory=/opt/git/sigmond/chirp-recorder
+
+ExecStartPre=+/bin/mkdir -p /var/lib/chirp-recorder /var/log/chirp-recorder
+ExecStartPre=+/usr/bin/chown chirprec:chirprec /var/lib/chirp-recorder
+ExecStartPre=+/usr/bin/chown -R chirprec:chirprec /var/log/chirp-recorder
+
+# %i names the instance, as for chirp-recorder@.service.  [scout] enabled = false
+# (the default) makes the verb exit 0 at once; Restart=on-failure then leaves the
+# unit stopped.
+ExecStart=/opt/git/sigmond/chirp-recorder/venv/bin/python3 -m chirp_recorder.cli scout %i
+
+TimeoutStartSec=60
+Restart=on-failure
+RestartSec=30
+
+StandardOutput=append:/var/log/chirp-recorder/scout-%i.log
+StandardError=inherit
+SyslogIdentifier=chirp-scout@%i
+
+# The scout yields to the recorder: low priority, a core's fifth, no swap.
+Nice=10
+CPUQuota=20%
+MemoryMax=512M
+MemorySwapMax=0
+
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/chirp-recorder /var/log/chirp-recorder
+# The sink: sweep and scout_dwell rows.  The "-" lets a host without sigmond
+# or hs-uploader start anyway.
+ReadWritePaths=-/var/lib/hs-uploader -/var/lib/sigmond
+ReadOnlyPaths=/etc/chirp-recorder
+PrivateNetwork=false
+
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_RAW CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

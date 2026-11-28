@@ -45,6 +45,11 @@ src  = "systemd/chirp-recorder@.service"
 dst  = "/etc/systemd/system/chirp-recorder@.service"
 
 [[install.steps]]
+kind = "link"
+src  = "systemd/chirp-scout@.service"
+dst  = "/etc/systemd/system/chirp-scout@.service"
+
+[[install.steps]]
 kind  = "mkdir"
 dst   = "/var/lib/chirp-recorder"
 owner = "chirprec:chirprec"
@@ -59,7 +64,7 @@ mode  = "0755"
 # No instances_from key: sigmond finds instances from
 # /etc/chirp-recorder/<KEY>.toml, one file per receiver.
 [systemd]
-templated_units = ["chirp-recorder@.service"]
+templated_units = ["chirp-recorder@.service", "chirp-scout@.service"]
 
 # No [[radiod.fragment]]: channels open on demand through ensure_channel.  A
 # static fragment would run a channel on every radiod, whether or not a client
@@ -69,7 +74,7 @@ templated_units = ["chirp-recorder@.service"]
 [deps]
 [[deps.pypi]]
 name    = "ka9q-python"
-version = ">=3.14.0"
+version = ">=3.29.0"
 venv    = "/opt/git/sigmond/chirp-recorder/venv"
 
 [[deps.pypi]]
@@ -79,7 +84,7 @@ venv    = "/opt/git/sigmond/chirp-recorder/venv"
 
 [[deps.pypi]]
 name    = "hamsci-dsp"
-version = ">=0.10.0"
+version = ">=0.11.0"
 venv    = "/opt/git/sigmond/chirp-recorder/venv"
 
 # ---------------------------------------------------------------------------
@@ -137,6 +142,64 @@ compression = "bz2"
 tar_root = "wsprdaemon"
 primary_table_name = "sigmondb.capture"
 tar_tag = "chirp-capture"
+[hs_uploader.pipeline.transport.ftp_fallback]
+servers = ["gw2.wsprdaemon.org"]
+ftp_user = "noisegraphs"
+remote_path = "upload"
+[hs_uploader.pipeline.retry]
+base = 2.0
+cap_sec = 900.0
+
+# The scout's rows (sweep, scout_dwell).  sigmond renders these only for an
+# hs-uploader that offers "sigmondb-scout" as well.
+[[hs_uploader.pipeline]]
+name = "chirp-sigmondb-sweep"
+requires_features = ["sigmondb-tar", "sigmondb-scout"]
+batch_limit = 5000
+[hs_uploader.pipeline.source]
+type = "sqlite"
+database = "sigmondb"
+table = "sweep"
+accepted_schema_versions = [1]
+producer = "chirp-scout"
+[hs_uploader.pipeline.transport]
+type = "wsprdaemon_tar"
+name = "wsprdaemon-tar-sftp:chirp-sigmondb-sweep"
+servers = ["gw1.wsprdaemon.org", "gw2.wsprdaemon.org"]
+version = "4.0"
+receiver = "{call_pathsafe}"
+compression = "bz2"
+tar_root = "wsprdaemon"
+primary_table_name = "sigmondb.sweep"
+tar_tag = "chirp-sweep"
+[hs_uploader.pipeline.transport.ftp_fallback]
+servers = ["gw2.wsprdaemon.org"]
+ftp_user = "noisegraphs"
+remote_path = "upload"
+[hs_uploader.pipeline.retry]
+base = 2.0
+cap_sec = 900.0
+
+[[hs_uploader.pipeline]]
+name = "chirp-sigmondb-scout-dwell"
+requires_features = ["sigmondb-tar", "sigmondb-scout"]
+batch_limit = 5000
+[hs_uploader.pipeline.source]
+type = "sqlite"
+database = "sigmondb"
+table = "scout_dwell"
+accepted_schema_versions = [1]
+producer = "chirp-scout"
+[hs_uploader.pipeline.transport]
+type = "wsprdaemon_tar"
+name = "wsprdaemon-tar-sftp:chirp-sigmondb-scout-dwell"
+servers = ["gw1.wsprdaemon.org", "gw2.wsprdaemon.org"]
+version = "4.0"
+receiver = "{call_pathsafe}"
+compression = "bz2"
+tar_root = "wsprdaemon"
+primary_table_name = "sigmondb.scout_dwell"
+tar_tag = "chirp-dwell"
 [hs_uploader.pipeline.transport.ftp_fallback]
 servers = ["gw2.wsprdaemon.org"]
 ftp_user = "noisegraphs"

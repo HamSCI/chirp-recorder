@@ -37,6 +37,7 @@ bash -n scripts/install.sh       # syntax check
   chirp-recorder's rows from its own `rows/` JSONL, codar-sounder's from
   `--codar-rows DIR` or else the sink queue. `tests/golden/README.md` says where the golden
   captures live.
+- `src/chirp_recorder/scout/` holds the scout: it reads radiod spectrum (never IQ), finds chirp sweeps, and writes `sweep` and `scout_dwell` rows; `chirp-scout@.service` runs it.
 - `src/chirp_recorder/_reporter_id.py` converts reporter-id spellings
   (`to_key`, `to_storage`, `systemd_instance`, `display`). It copies
   codar-sounder's module unchanged and goes when codar-sounder retires.

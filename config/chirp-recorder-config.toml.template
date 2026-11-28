@@ -37,4 +37,40 @@ transmitters = ["AGL1"]
 # Re-derive it from the rows: (delay_ns - path delay) * sample_rate_hz / 1e9.
 # tdma_offset_samples = { AGL1 = 0 }
 
+# The scout watches radiod's spectrum (never IQ) for chirp sweeps and sends
+# sweep and scout_dwell rows.  Off by default.  Uncomment to tune; every key shown
+# holds its default.  status and state_dir fall back to the first [[channel]]'s
+# status and <output_dir>/scout.
+# [scout]
+# # false: the unit exits 0 at once.  true starts the watch.
+# enabled = false
+# # radiod status DNS name; "" takes the first [[channel]]'s.
+# status = ""
+# # top of the coarse spectrum, Hz (half the RX888 sample rate).
+# nyquist_hz = 64800000.0
+# # coarse spectrum bin width, Hz.
+# coarse_bin_hz = 4000.0
+# # seconds between coarse spectrum polls.
+# coarse_poll_s = 0.4
+# # seconds of coarse history the line search keeps.
+# coarse_window_s = 3600.0
+# # width of each fine window, Hz.
+# fine_span_hz = 2000000.0
+# # fine spectrum bin width, Hz.
+# fine_bin_hz = 150.0
+# # seconds between fine spectrum polls.
+# fine_poll_s = 0.15
+# # seconds the fine window stays on one target.
+# dwell_s = 45.0
+# # fewest frames a dwell needs before it writes a scout_dwell row.
+# min_frames = 100
+# # fine window centres, MHz, one per CODAR band.
+# targets_mhz = [4.86, 9.33, 13.50, 16.15, 25.40]
+# # hosts that publish the known chirp list.
+# public_hosts = ["https://db2.wspr.live", "https://wd1.wsprdaemon.org", "https://wd2.wsprdaemon.org"]
+# # seconds between refreshes of that list.
+# refresh_s = 3600.0
+# # cache and JSONL directory; the default is <output_dir>/scout.
+# state_dir = "/var/lib/chirp-recorder/CALL-ID/scout"
+
 # [physics] is defined with the physics stopgap.

@@ -31,6 +31,23 @@ and `=` into `-`, so AC0G/B1A becomes AC0G-B1A.
 - Data: `/var/lib/chirp-recorder/<KEY>/`
 - Log: `/var/log/chirp-recorder/<KEY>.log`
 
+## The scout
+
+The scout watches radiod's spectrum for CODAR chirp sweeps. It reads spectrum
+channels only and never IQ. The timing path above keeps all IQ work.
+
+It writes `sweep` and `scout_dwell` rows to the station sink. hs-uploader
+sends them to wd30 through the `chirp-sigmondb-sweep` and
+`chirp-sigmondb-scout-dwell` pipelines.
+
+It costs radiod one coarse and one fine spectrum channel. On SIGMA that came to
+7.9 % of a core. The unit itself runs at `Nice=10` under `CPUQuota=20%`.
+
+It is off by default. To turn it on, set `enabled = true` in the `[scout]` table
+of `/etc/chirp-recorder/<KEY>.toml`, then start `chirp-scout@<KEY>.service`.
+The config template lists every `[scout]` key with its default. The log is
+`/var/log/chirp-recorder/scout-<KEY>.log`.
+
 ## Develop
 
 ```
