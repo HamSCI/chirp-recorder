@@ -86,7 +86,8 @@ def test_screen_drops_carriers_and_counts_them():
     kept, dropped = screen([carrier, weak, good], Published((), (), None, "none"),
                            nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.8)
     assert [k[0] for k in kept] == [good]
-    assert dropped == {"carrier": 1, "alias": 0, "not_persistent": 1}
+    assert dropped == {"carrier": 1, "alias": 0, "not_persistent": 1,
+                       "subharmonic": 0}
     kept, dropped = screen([weak], Published((), (), None, "none"),
                            nyquist_hz=64.8e6, min_sweeps=2, min_fit=0.8)
     assert len(kept) == 1
@@ -130,3 +131,30 @@ def test_sweep_row_allows_missing_duration():
     r = _row(streak())
     assert r["duration_s"] is None
     assert json.loads(json.dumps(r))["duration_s"] is None
+
+
+def test_screen_drops_a_subharmonic_twin():
+    """One source, found again at twice its period (every other sweep):
+    keep the shorter period, count the other as "subharmonic"."""
+    short = streak(centre=5.2631e6, rate=-25920.0, period=1.0)
+    long = streak(centre=5.2637e6, rate=-25475.0, period=1.9991)
+    kept, dropped = screen([long, short], Published((), (), None, "none"),
+                           nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.6)
+    assert [k[0] for k in kept] == [short]
+    assert dropped["subharmonic"] == 1
+
+
+def test_screen_keeps_a_non_integer_period_ratio():
+    a = streak(centre=5.2631e6, rate=-25920.0, period=1.0)
+    b = streak(centre=5.2631e6, rate=-25920.0, period=1.5)
+    kept, dropped = screen([a, b], Published((), (), None, "none"),
+                           nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.6)
+    assert len(kept) == 2 and dropped["subharmonic"] == 0
+
+
+def test_screen_keeps_a_twice_period_streak_elsewhere():
+    a = streak(centre=5.2631e6, rate=-25920.0, period=1.0)
+    b = streak(centre=5.2831e6, rate=-25920.0, period=2.0)
+    kept, dropped = screen([a, b], Published((), (), None, "none"),
+                           nyquist_hz=64.8e6, min_sweeps=5, min_fit=0.6)
+    assert len(kept) == 2 and dropped["subharmonic"] == 0

@@ -10,12 +10,15 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence
 
-from hamsci_dsp.chirp.scout_screen import (artefact_reason, match_key,
+from hamsci_dsp.chirp.scout_screen import (Signature, artefact_reason, match_key,
                                            persistent, reject_match)
 from hamsci_dsp.chirp.streaks import Streak
 
 from chirp_recorder.scout.plan import Dwell
 from chirp_recorder.scout.published import Published
+
+SUBHARMONIC_K = (2, 3, 4)
+SUBHARMONIC_TOL = 0.01
 
 DETECTOR_VERSION = "scout-1"
 SCHEMA_VERSION = 1
@@ -74,9 +77,12 @@ def screen(streaks: Sequence[Streak], published: Published, *,
     """Streaks that pass, each with its matched key and engineering tags, and
     counts of those dropped by reason.  A locally rejected streak passes: the
     server records it as heard while rejected.  ``min_fit`` goes to
-    ``persistent``; the runner passes 0.6, since SIGMA's CODAR fits 0.71."""
+    ``persistent``; the runner passes 0.6, since SIGMA's CODAR fits 0.71.
+    Last, a streak that repeats another's centre and rate at 2, 3 or 4
+    times its period (the same source, every other sweep) goes as
+    "subharmonic"."""
     kept: list[tuple[Streak, str, dict]] = []
-    dropped = {"carrier": 0, "alias": 0, "not_persistent": 0}
+    dropped = {"carrier": 0, "alias": 0, "not_persistent": 0, "subharmonic": 0}
     for s in streaks:
         why = artefact_reason(s, streaks, nyquist_hz=nyquist_hz)
         if why:
@@ -89,4 +95,24 @@ def screen(streaks: Sequence[Streak], published: Published, *,
             if rej:
                 eng["local_reject"] = rej
             kept.append((s, match_key(s, published.chirps), eng))
-    return kept, dropped
+    out = [k for k in kept if not _subharmonic(k[0], [o[0] for o in kept])]
+    dropped["subharmonic"] = len(kept) - len(out)
+    return out, dropped
+
+
+def _subharmonic(s: Streak, others: Sequence[Streak]) -> bool:
+    """True when another streak matches s on centre, rate and span (the
+    signature match with no period) and s's period is k = 2, 3 or 4 times
+    that streak's, within 1 % of s's period."""
+    if s.period_s is None:
+        return False
+    for o in others:
+        if o is s or o.period_s is None or o.period_s >= s.period_s:
+            continue
+        sig = Signature(o.centre_hz, o.rate_hz_per_s, None, o.span_hz, "o")
+        if not match_key(s, (sig,)):
+            continue
+        if any(abs(s.period_s - k * o.period_s) <= SUBHARMONIC_TOL * s.period_s
+               for k in SUBHARMONIC_K):
+            return True
+    return False
