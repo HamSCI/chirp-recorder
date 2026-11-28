@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 import urllib.request
@@ -57,12 +58,18 @@ def _parse(body: bytes, key_field: str) -> tuple:
         if not line.strip():
             continue
         r = json.loads(line)
-        out.append(Signature(
+        sig = Signature(
             centre_hz=float(r["centre_mhz"]) * 1e6,
             rate_hz_per_s=float(r["rate_khz_s"]) * 1e3,
             period_s=None if r.get("period_s") is None else float(r["period_s"]),
             span_hz=_scaled(r.get("span_khz"), 1e3),
-            key=str(r[key_field])))
+            key=str(r[key_field]))
+        # json.loads takes NaN and Infinity; a row holding one is malformed,
+        # and the host counts as failed.
+        if not all(math.isfinite(v) for v in (sig.centre_hz, sig.rate_hz_per_s,
+                                              sig.period_s, sig.span_hz) if v is not None):
+            raise ValueError(f"non-finite number in a published row: {line!r}")
+        out.append(sig)
     return tuple(out)
 
 

@@ -87,3 +87,15 @@ def test_https_get_rejects_other_schemes():
         published._https_get("http://db2.wspr.live/?query=1", 5.0)
     with pytest.raises(ValueError):
         published._https_get("file:///etc/passwd", 5.0)
+
+
+def test_a_non_finite_number_fails_the_host(tmp_path):
+    """json.loads takes NaN; such a row is malformed and the host fails (R21)."""
+    nan = (b'{"group_key":"g1","centre_mhz":NaN,"rate_khz_s":-100.0,'
+           b'"period_s":0.5,"span_khz":50.0}\n')
+    inf = (b'{"chirp_id":"r1","centre_mhz":13.5,"rate_khz_s":10.0,'
+           b'"period_s":Infinity,"span_khz":null}\n')
+    f = Fake({"https://a": (nan, REJECTS), "https://b": (CHIRPS, inf),
+              "https://c": (CHIRPS, REJECTS)})
+    p = load_published(tmp_path, ["https://a", "https://b", "https://c"], "X/1", fetch=f)
+    assert p.source == "https://c"

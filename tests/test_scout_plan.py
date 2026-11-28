@@ -60,3 +60,11 @@ def test_near_duplicate_chirps_merge_and_position_survives_changes():
     assert c.next(pub2, 1).centre_hz == 11.0e6
     assert c.next(NONE, 2).centre_hz == approx(16.15e6)
     assert c.next(NONE, 2).centre_hz == 25.40e6
+
+
+def test_a_flag_near_a_pending_flag_is_dropped():
+    c = DwellCycle(SET)
+    assert c.flag(7.0e6, 0.0)
+    assert not c.flag(7.0e6 + SET.fine_span_hz / 2, 1.0)
+    assert c.flag(7.0e6 + SET.fine_span_hz / 2 + 1.0, 2.0)
+    assert [c.next(NONE, 3.0).reason for _ in range(3)] == ["flag", "flag", "band"]

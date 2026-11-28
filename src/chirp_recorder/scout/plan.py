@@ -33,9 +33,14 @@ class DwellCycle:
         self._ci = 0            # next chirp window
         self._want_target = True
 
-    def flag(self, centre_hz: float, now: float) -> None:
-        """Queue a fine window on a coarse hit."""
+    def flag(self, centre_hz: float, now: float) -> bool:
+        """Queue a fine window on a coarse hit; False (and nothing queued)
+        when a pending flag lies within half a fine span of it."""
+        half = self._s.fine_span_hz / 2
+        if any(abs(centre_hz - c) <= half for c, _ in self._flags):
+            return False
         self._flags.append((float(centre_hz), float(now)))
+        return True
 
     def _clamp(self, centre_hz: float) -> float:
         half = self._s.fine_span_hz / 2

@@ -109,8 +109,16 @@ def fine_settings(**kw):
     return ScoutSettings(enabled=True, status="x-status.local", **kw)
 
 
+def advance(clock):
+    """A wait that moves the fake clock instead of sleeping."""
+    def wait(ev, s):
+        clock.t += s
+    return wait
+
+
 def make_scout(settings, world, clock, rows=None, **kw):
     rows = [] if rows is None else rows
+    kw.setdefault("wait", advance(clock))
     return Scout(settings, "AC0G/T7", control_factory=world.control,
                  stream_factory=world.stream,
                  writer=lambda table, row: rows.append((table, row)),
@@ -292,10 +300,9 @@ def test_coarse_window_flags_the_fine_cycle():
     scout.run(threading.Event(), max_dwells=4)
     assert world.coarse()[0].freq == pytest.approx(8.0e6)
     assert world.coarse()[0].bin_count == n_coarse
-    coarse_sweeps = [r for t, r in rows if t == "sweep" and r["view"] == "coarse"]
-    assert len(coarse_sweeps) == 1
-    assert coarse_sweeps[0]["centre_hz"] == pytest.approx(7.3e6, abs=10e3)
-    assert any(t == "scout_dwell" and r["view"] == "coarse" for t, r in rows)
+    # R19: a 400 kHz sweep is narrower than a fine window, so it only flags;
+    # R18: the coarse view writes no dwell rows.
+    assert not any(r["view"] == "coarse" for t, r in rows)
     tuned = [f for x in world.fine() for f in x.tuned]
     assert tuned[0] == pytest.approx(4.86e6)
     assert any(abs(f - 7.3e6) < 10e3 for f in tuned[1:])
@@ -368,9 +375,10 @@ def test_scout_writer_sends_to_the_sinks(tmp_path, monkeypatch):
     assert all(x.closed for x in sinks.values())
 
 
-def test_a_failing_line_search_still_writes_the_dwell_row(monkeypatch):
+def test_a_failing_line_search_writes_no_rows(monkeypatch, caplog):
     """A crash in find_streaks (seen: a zero fitted rate on SIGMA's full
-    waterfall) loses the sweeps, never the record that the scout listened."""
+    waterfall): the dwell could not look, so it claims nothing (R18).  The
+    channel was fine, so the next dwell keeps it."""
     import chirp_recorder.scout.runner as runner
 
     def boom(*a, **k):
@@ -380,10 +388,13 @@ def test_a_failing_line_search_still_writes_the_dwell_row(monkeypatch):
     clock = Clock()
     n_bins = int(s.fine_span_hz / s.fine_bin_hz)
     world = World(s, clock, lambda st, f: [(0.15, np.full(n_bins, -100.0), None)] * 100)
-    sweeps, dwell = make_scout(s, world, clock).run_dwell(
-        Dwell("fine", 4.86e6, s.fine_span_hz, s.fine_bin_hz, "band"))
-    assert sweeps == [] and dwell is not None and dwell["n_streaks"] == 0
-    assert "ZeroDivisionError" in dwell["engineering"]["search_error"]
+    scout = make_scout(s, world, clock)
+    with caplog.at_level(logging.WARNING):
+        sweeps, dwell = scout.run_dwell(
+            Dwell("fine", 4.86e6, s.fine_span_hz, s.fine_bin_hz, "band"))
+    assert sweeps == [] and dwell is None
+    assert "line search failed" in caplog.text and "ZeroDivisionError" in caplog.text
+    assert not scout._fine_stale
 
 
 def test_coarse_window_closes_early_when_it_holds_too_many_dashes(caplog):
@@ -407,8 +418,10 @@ def test_coarse_window_closes_early_when_it_holds_too_many_dashes(caplog):
     with caplog.at_level(logging.WARNING):
         scout.run(threading.Event(), max_dwells=1)
     assert "coarse window closed early at" in caplog.text
-    assert any(t == "scout_dwell" and r["view"] == "coarse" for t, r in rows)
-    assert any(t == "sweep" and r["view"] == "coarse" for t, r in rows)
+    # The early window ran its search: its narrow sweep flagged the fine
+    # cycle (R19), and the coarse view wrote no rows (R18).
+    assert scout.cycle._flags and abs(scout.cycle._flags[0][0] - 7.3e6) < 10e3
+    assert not any(r["view"] == "coarse" for t, r in rows)
     assert scout._coarse_held() == 0          # the new window holds none of the old dashes
 
 
@@ -446,7 +459,7 @@ def test_a_failed_coarse_reopen_does_not_end_the_run():
     scout = Scout(s, "AC0G/T7", control_factory=world.control, stream_factory=stream,
                   writer=lambda t, r: None, now=lambda: 1.795e9, monotonic=clock,
                   utcnow=lambda: datetime(2026, 11, 28, 12, 0, tzinfo=timezone.utc),
-                  published_loader=lambda: EMPTY)
+                  published_loader=lambda: EMPTY, wait=advance(clock))
     dwells = 6
     scout.run(threading.Event(), max_dwells=dwells)
     assert len(built) >= 3                          # silent, failed reopen, reopened
@@ -492,3 +505,231 @@ def test_fine_centres_round_to_whole_bins_and_snapped_frequency_is_kept():
     assert abs(tuned - 7_298_012.3) <= s.fine_bin_hz / 2
     assert dwell is not None and dwell["centre_hz"] == tuned
     assert dwell["engineering"]["frames_other_freq"] == "0"
+
+
+# --- final-review fix wave (R18-R21) ------------------------------------------
+
+def coarse_settings(**kw):
+    base = dict(enabled=True, status="x", nyquist_hz=16.0e6, coarse_bin_hz=4000.0,
+                coarse_window_s=60.0, targets_mhz=(4.86, 9.33), min_frames=50)
+    base.update(kw)
+    return ScoutSettings(**base)
+
+
+def coarse_sweep_frames(s, n, *, lo, hi, rate, period, samprate=None, seed=3):
+    rng = np.random.default_rng(seed)
+    n_coarse = int(s.nyquist_hz / s.coarse_bin_hz)
+    fe = None if samprate is None else SimpleNamespace(input_samprate=samprate)
+    out = []
+    for i in range(n):
+        p = sweep_frame(rng, f0_hz=0.0, bin_hz=s.coarse_bin_hz, n_bins=n_coarse,
+                        t_s=(i + 1) * 0.4, frame_s=0.4, rate=rate, lo=lo, hi=hi,
+                        period=period)
+        out.append((0.4, p, GPS0_NS + int((i + 1) * 0.4e9), fe))
+    return out
+
+
+class CoarseWorld(World):
+    """Coarse frames, delivered once on the first coarse start; may carry
+    a frontend with input_samprate."""
+
+    def __init__(self, s, clock, frames):
+        super().__init__(s, clock, None)
+        self.frames = frames
+
+    def stream(self, control, frequency_hz, bin_count, resolution_bw, *,
+               poll_interval_sec, on_spectrum):
+        st = super().stream(control, frequency_hz, bin_count, resolution_bw,
+                            poll_interval_sec=poll_interval_sec, on_spectrum=on_spectrum)
+        world = self
+
+        def deliver():
+            st.tuned.append(st.freq)
+            if st.view == "coarse" and st is world.coarse()[0]:
+                for dt, p, g, fe in world.frames:
+                    world.clock.t += dt
+                    ns = SimpleNamespace(spectrum=SimpleNamespace(bin_power_db=p),
+                                         gps_time=g, frequency=st.freq)
+                    if fe is not None:
+                        ns.frontend = fe
+                    st.cb(ns)
+            if st.view == "fine":
+                world.clock.t += world.s.dwell_s + 1.0
+        st._deliver = deliver
+        return st
+
+
+def test_burst_heavy_dwell_under_min_frames_writes_nothing(caplog):
+    """min_frames counts frames that could show a dash: bursts do not (R18)."""
+    s = fine_settings(min_frames=50)
+    clock = Clock()
+    n_bins = int(s.fine_span_hz / s.fine_bin_hz)
+    rng = np.random.default_rng(5)
+
+    def frame(burst):
+        p = -100.0 + rng.normal(0.0, 1.0, n_bins)
+        if burst:                       # 150 two-bin runs: over the 100-dash cap
+            k = rng.choice(n_bins // 4, 150, replace=False) * 4
+            p[k] += 20.0
+            p[k + 1] += 20.0
+        return p
+
+    frames = [(0.15, frame(i % 5 != 0), None) for i in range(100)]   # 80 % bursts
+    world = World(s, clock, lambda st, f: frames)
+    with caplog.at_level(logging.WARNING):
+        sweeps, dwell = make_scout(s, world, clock).run_dwell(
+            Dwell("fine", 4.86e6, s.fine_span_hz, s.fine_bin_hz, "band"))
+    assert sweeps == [] and dwell is None
+    assert "dwell starved" in caplog.text and "less bursts" in caplog.text
+
+
+def test_dwell_row_names_its_view_limits():
+    s = fine_settings(min_frames=20)
+    clock = Clock()
+    n_bins = int(s.fine_span_hz / s.fine_bin_hz)
+    world = World(s, clock, lambda st, f: [(0.15, np.full(n_bins, -100.0), None)] * 100)
+    _, dwell = make_scout(s, world, clock).run_dwell(
+        Dwell("fine", 4.86e6, s.fine_span_hz, s.fine_bin_hz, "band"))
+    e = dwell["engineering"]
+    assert (e["rate_min_hz_s"], e["rate_max_hz_s"], e["min_span_hz"], e["bin_hz"]) == (
+        "200.0", "200000.0", "10000.0", "150.0")
+
+
+def test_wide_coarse_sweep_writes_a_sweep_row_and_no_dwell_row():
+    """R19: a sweep at least a fine window wide is the coarse view's to
+    report; R18: the coarse view writes no scout_dwell row."""
+    s = coarse_settings()
+    clock = Clock()
+    frames = coarse_sweep_frames(s, 160, lo=11.0e6, hi=13.5e6, rate=2.5e5, period=12.0)
+    rows: list = []
+    world = CoarseWorld(s, clock, frames)
+    scout = make_scout(s, world, clock, rows)
+    scout.run(threading.Event(), max_dwells=2)
+    coarse = [(t, r) for t, r in rows if r["view"] == "coarse"]
+    assert [t for t, _ in coarse] == ["sweep"]
+    assert coarse[0][1]["span_hz"] >= s.fine_span_hz
+    assert not scout.cycle._flags
+
+
+def test_coarse_window_below_half_its_frames_writes_nothing(caplog):
+    s = coarse_settings()
+    clock = Clock()
+    # 100 frames (40 s) in a window of 86 s at 0.4 s polls: 215 promised, 108 needed
+    frames = coarse_sweep_frames(s, 100, lo=11.0e6, hi=13.5e6, rate=1.0e6, period=5.0)
+    rows: list = []
+    world = CoarseWorld(s, clock, frames)
+    with caplog.at_level(logging.WARNING):
+        make_scout(s, world, clock, rows).run(threading.Event(), max_dwells=2)
+    assert not any(r["view"] == "coarse" for t, r in rows)
+    assert "dwell starved: coarse" in caplog.text and "min_frames 108" in caplog.text
+
+
+def test_nyquist_mismatch_stops_the_scout():
+    from chirp_recorder.scout.runner import ScoutConfigError
+    s = coarse_settings()
+    clock = Clock()
+    frames = coarse_sweep_frames(s, 5, lo=11.0e6, hi=13.5e6, rate=1.0e6, period=5.0,
+                                 samprate=129_600_000)
+    world = CoarseWorld(s, clock, frames)
+    with pytest.raises(ScoutConfigError, match="64800000"):
+        make_scout(s, world, clock).run(threading.Event(), max_dwells=3)
+    assert world.fine() == [] and all(x.stopped for x in world.streams)
+
+
+def test_nyquist_matching_or_absent_runs(caplog):
+    s = coarse_settings()
+    for rate in (32_000_000, None):
+        clock = Clock()
+        frames = coarse_sweep_frames(s, 5, lo=11.0e6, hi=13.5e6, rate=1.0e6, period=5.0,
+                                     samprate=rate)
+        world = CoarseWorld(s, clock, frames)
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            make_scout(s, world, clock).run(threading.Event(), max_dwells=1)
+        assert len(world.fine()) == 1
+        assert ("no input sample rate" in caplog.text) == (rate is None)
+        assert caplog.text.count("no input sample rate") <= 1
+
+
+def test_cli_returns_one_on_a_config_contradiction(tmp_path, monkeypatch):
+    import chirp_recorder.scout.runner as runner
+    from chirp_recorder.cli import main
+    from tests.test_scout_settings import cfg_for
+    cfg_for(tmp_path, '\n[scout]\nenabled = true\n')
+
+    class Contradicted:
+        def __init__(self, *a, **k):
+            pass
+
+        def run(self, stop, max_dwells=None):
+            raise runner.ScoutConfigError("[scout] nyquist_hz = 1 Hz, but radiod ...")
+
+    monkeypatch.setattr(runner, "Scout", Contradicted)
+    assert main(["--etc", str(tmp_path), "scout", "AC0G-T7", "--dry-run"]) == 1
+
+
+def test_coarse_flags_are_capped_and_deduplicated():
+    from hamsci_dsp.chirp.streaks import Streak
+    s = coarse_settings()
+    clock = Clock()
+    world = World(s, clock, lambda st, f: [])
+    scout = make_scout(s, world, clock)
+
+    def st(mhz):
+        return (Streak(mhz * 1e6, 300e3, 5e4, 10.0, 6.0, 20.0, 5, 0.9, False, (0.0,)), "", {})
+    # 7.3 and 7.8 MHz lie within half a fine span: one flag.  Then six more
+    # apart from each other and from the targets: the cap stops at 5.
+    passed = [st(m) for m in (7.3, 7.8, 1.2, 2.6, 11.0, 12.5, 14.0)]
+    scout._coarse_acc = None
+
+    class Acc:
+        dwell = Dwell("coarse", 8e6, 16e6, 4000.0, "band")
+        counts = {"frames_received": 1}
+        n_frames = n_used = 200
+    scout._coarse_acc = Acc()
+    scout._rows = lambda acc, **kw: ([], {"engineering": {"streaks_found": "7"}}, passed, "ok")
+    scout._close_coarse_window()
+    centres = [c for c, _ in scout.cycle._flags]
+    assert len(centres) == 5
+    assert centres == pytest.approx([7.3e6, 1.2e6, 2.6e6, 11.0e6, 12.5e6])
+
+
+def test_backoff_doubles_to_five_minutes_and_logs_each_step(caplog):
+    from chirp_recorder.scout.runner import _Backoff
+    clock = Clock(0.0)
+    b = _Backoff(clock)
+    assert b.due()
+    delays = []
+    with caplog.at_level(logging.INFO):
+        for _ in range(9):
+            b.failed(OSError("no route"))
+            delays.append(b.delay)
+            assert not b.due()
+            clock.t = b.next_at
+            assert b.due()
+        b.ok()
+        b.ok()
+    assert delays == [5, 10, 20, 40, 80, 160, 300, 300, 300]
+    assert caplog.text.count("radiod unreachable") == 9
+    assert caplog.text.count("radiod reachable again") == 1
+
+
+def test_radiod_unreachable_at_start_is_retried_with_backoff():
+    s = coarse_settings()
+    clock = Clock(0.0)
+    world = World(s, clock, lambda st, f: [])
+    tries = []
+
+    def control(status):
+        tries.append(clock.t)
+        if len(tries) <= 3:
+            raise OSError("radiod gone")
+        return world.control(status)
+
+    scout = Scout(s, "AC0G/T7", control_factory=control, stream_factory=world.stream,
+                  writer=lambda t, r: None, now=lambda: 1.795e9, monotonic=clock,
+                  utcnow=lambda: datetime(2026, 11, 28, 12, 0, tzinfo=timezone.utc),
+                  published_loader=lambda: EMPTY, wait=advance(clock))
+    scout.run(threading.Event(), max_dwells=1)
+    assert tries == [0.0, 5.0, 15.0, 35.0]
+    assert len(world.coarse()) == 1 and len(world.fine()) == 1

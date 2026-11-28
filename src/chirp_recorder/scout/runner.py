@@ -55,6 +55,7 @@ class ViewCost:
     min_sweeps: int
     min_fit: float
     min_span_hz: float = 10_000.0
+    rate_min_hz_s: float = 200.0
 
 
 FINE = ViewCost(max_dashes=100, rate_max_hz_s=2.0e5, min_sweeps=5, min_fit=0.6)
@@ -64,6 +65,22 @@ COARSE = ViewCost(max_dashes=100, rate_max_hz_s=2.0e6, min_sweeps=2, min_fit=0.6
 # 289 MB, 300 000 745 MB.  100 000 leaves room for the up to ~12 000 a
 # window gains during the dwell before the check runs.
 COARSE_MAX_HELD = 100_000
+# A coarse window must hold this share of the frames its length and poll
+# interval promise, or it writes nothing.
+COARSE_MIN_FRAME_SHARE = 0.5
+# The coarse view writes no scout_dwell rows: wd30's dwell_hourly counts any
+# dwell whose centre +/- span/2 covers a chirp as a silent hour, whatever its
+# view, and the coarse view cannot see a CODAR.  Turn on once dwell_hourly is
+# view-aware (R18).
+COARSE_DWELL_ROWS = False
+COARSE_MAX_FLAGS = 5        # fine-dwell flags one coarse window may raise
+NYQUIST_TOL = 0.01          # configured nyquist_hz against radiod's input rate / 2
+BACKOFF_FIRST_S = 5.0       # radiod unreachable: retry after 5 s, doubling ...
+BACKOFF_MAX_S = 300.0       # ... up to 300 s
+
+
+class ScoutConfigError(RuntimeError):
+    """The configuration contradicts what radiod reports; the scout stops."""
 
 
 def clean_power(power_db) -> Optional[np.ndarray]:
@@ -145,7 +162,13 @@ class _Accum:
 
     @property
     def n_frames(self) -> int:
+        """Frames folded in after the settle, bursts included."""
         return len(self.mono)
+
+    @property
+    def n_used(self) -> int:
+        """Frames that could show a dash: n_frames less the bursts."""
+        return len(self.mono) - self.counts["bursts"]
 
     def times(self) -> tuple[np.ndarray, str]:
         """Frame times in seconds from the first frame, and their source."""
@@ -158,7 +181,7 @@ class _Accum:
     def streaks(self, *, guard: bool = False) -> tuple[list[Streak], float, str, str]:
         """The line search over this dwell's dashes: (streaks, frame_s,
         time_source, error).  With ``guard`` a failing search returns no
-        streaks and its error, so the dwell still counts as listened."""
+        streaks and its error instead of raising."""
         t, source = self.times()
         frame_s = float(np.mean(np.diff(t))) if t.size >= 2 else 0.0
         if t.size < 2 or frame_s <= 0:
@@ -168,6 +191,7 @@ class _Accum:
             found = find_streaks(dashes, view_lo_hz=self.f0_hz,
                                  view_hi_hz=self.f0_hz + self.n_bins * self.dwell.bin_hz,
                                  bin_hz=self.dwell.bin_hz, frame_s=frame_s,
+                                 rate_min_hz_s=self.cost.rate_min_hz_s,
                                  rate_max_hz_s=self.cost.rate_max_hz_s)
         except Exception as exc:  # noqa: BLE001
             if not guard:
@@ -326,6 +350,33 @@ def _stop_stream(s, what: str) -> None:
         log.warning("%s stream stop failed: %s", what, exc)
 
 
+class _Backoff:
+    """Retry timing while radiod is unreachable: 5 s, doubling to 300 s.
+    Logs each failed try (one line per backoff step) and the recovery."""
+
+    def __init__(self, clock: Callable[[], float]):
+        self._clock = clock
+        self.delay = 0.0
+        self.next_at: Optional[float] = None
+
+    def due(self) -> bool:
+        return self.next_at is None or self._clock() >= self.next_at
+
+    def wait_s(self) -> float:
+        return 0.0 if self.next_at is None else max(0.0, self.next_at - self._clock())
+
+    def failed(self, exc: Exception) -> None:
+        self.delay = BACKOFF_FIRST_S if not self.delay else min(2 * self.delay, BACKOFF_MAX_S)
+        self.next_at = self._clock() + self.delay
+        log.warning("radiod unreachable (%s: %s); next try in %.0f s",
+                    type(exc).__name__, exc, self.delay)
+
+    def ok(self) -> None:
+        if self.delay:
+            log.info("radiod reachable again")
+        self.delay, self.next_at = 0.0, None
+
+
 class Scout:
     def __init__(self, settings: ScoutSettings, reporter_id: str, *,
                  control_factory: Callable = _default_control,
@@ -335,7 +386,8 @@ class Scout:
                  monotonic: Callable[[], float] = time.monotonic,
                  utcnow: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                  published_loader: Optional[Callable[[], Published]] = None,
-                 coarse_max_held: int = COARSE_MAX_HELD):
+                 coarse_max_held: int = COARSE_MAX_HELD,
+                 wait: Callable[[threading.Event, float], object] = lambda ev, s: ev.wait(s)):
         self.s = settings
         self.reporter_id = reporter_id
         self.coarse_max_held = int(coarse_max_held)
@@ -361,6 +413,10 @@ class Scout:
         self.cycle = DwellCycle(settings)
         self.published = Published((), (), None, "none")
         self._published_at: Optional[float] = None
+        self._wait = wait
+        self._backoff = _Backoff(monotonic)
+        self._rate_checked = False
+        self.fatal: Optional[str] = None
 
     # -- channels
 
@@ -377,9 +433,30 @@ class Scout:
 
     def _on_coarse(self, st) -> None:
         arrival = self._mono()
+        if not self._rate_checked:
+            self._rate_checked = True
+            self._check_nyquist(st)
         with self._coarse_lock:
             if self._coarse_acc is not None:
                 _add(self._coarse_acc, st, arrival)
+
+    def _check_nyquist(self, st) -> None:
+        """Compare nyquist_hz with half radiod's input sample rate
+        (frontend.input_samprate, INPUT_SAMPRATE) on the first coarse status."""
+        fe = getattr(st, "frontend", None)
+        rate = getattr(fe, "input_samprate", None) if fe is not None else None
+        if not rate:
+            log.warning("radiod status carries no input sample rate; "
+                        "nyquist_hz %.0f Hz unchecked", self.s.nyquist_hz)
+            return
+        half = float(rate) / 2
+        if abs(self.s.nyquist_hz - half) > NYQUIST_TOL * half:
+            self.fatal = (f"[scout] nyquist_hz = {self.s.nyquist_hz:.0f} Hz, but radiod's "
+                          f"input sample rate {float(rate):.0f} Hz gives {half:.0f} Hz")
+            log.error("%s; the scout stops", self.fatal)
+
+    def _halted(self) -> bool:
+        return self._stop.is_set() or self.fatal is not None
 
     def _coarse_dwell(self) -> Dwell:
         return Dwell("coarse", self.s.nyquist_hz / 2, self.s.nyquist_hz,
@@ -441,16 +518,23 @@ class Scout:
     # -- rows
 
     def _rows(self, acc: _Accum, *, start_utc: datetime, duration_s: float,
-              cost: ViewCost) -> tuple[list[dict], Optional[dict], list]:
-        """(sweep rows, dwell row, screened streaks); ([], None, []) for a
-        dwell with fewer than min_frames frames."""
+              cost: ViewCost, min_frames: int) -> tuple[list[dict], Optional[dict], list, str]:
+        """(sweep rows, dwell row, screened streaks, outcome).  Outcome
+        "starved" (fewer than min_frames non-burst frames) and "search_error"
+        give ([], None, [], outcome): a dwell row claims the scout listened,
+        and neither dwell could."""
         d = acc.dwell
-        if acc.n_frames < self.s.min_frames:
-            log.warning("dwell starved: %s %.3f MHz got %d frames, min_frames %d (%s)",
-                        d.view, d.centre_hz / 1e6, acc.n_frames, self.s.min_frames,
-                        ", ".join(f"{k} {v}" for k, v in acc.counts.items()))
-            return [], None, []
+        counts = ", ".join(f"{k} {v}" for k, v in acc.counts.items())
+        if acc.n_used < min_frames:
+            log.warning("dwell starved: %s %.3f MHz got %d frames (%d less bursts), "
+                        "min_frames %d (%s)", d.view, d.centre_hz / 1e6, acc.n_frames,
+                        acc.n_used, min_frames, counts)
+            return [], None, [], "starved"
         found, frame_s, source, error = acc.streaks(guard=True)
+        if error:
+            log.warning("dwell dropped: %s %.3f MHz, line search failed (%s); no rows (%s)",
+                        d.view, d.centre_hz / 1e6, error, counts)
+            return [], None, [], "search_error"
         passed, dropped = screen(found, self.published, nyquist_hz=self.s.nyquist_hz,
                                  min_sweeps=cost.min_sweeps, min_fit=cost.min_fit,
                                  min_span_hz=cost.min_span_hz)
@@ -465,14 +549,14 @@ class Scout:
         eng = {"time_source": source, "reason": d.reason, "streaks_found": len(found),
                **acc.counts, **{f"dropped_{k}": v for k, v in dropped.items()},
                "published_source": self.published.source,
-               "published_age_s": "" if age is None else age}
-        if error:
-            eng["search_error"] = error
+               "published_age_s": "" if age is None else age,
+               "rate_min_hz_s": cost.rate_min_hz_s, "rate_max_hz_s": cost.rate_max_hz_s,
+               "min_span_hz": cost.min_span_hz, "bin_hz": d.bin_hz}
         row = dwell_row(dwell=d, start_utc=start_utc, reporter_id=self.reporter_id,
-                        frame_s=frame_s, duration_s=duration_s, n_frames=acc.n_frames,
+                        frame_s=frame_s, duration_s=duration_s, n_frames=acc.n_used,
                         noise_db=float(np.median(acc.medians)), n_streaks=len(passed),
                         engineering=eng)
-        return sweeps, row, passed
+        return sweeps, row, passed, "ok"
 
     def run_dwell(self, dwell: Dwell) -> tuple[list[dict], Optional[dict]]:
         """Listen on the fine channel for dwell_s; return (sweep rows, dwell
@@ -487,7 +571,7 @@ class Scout:
             self._fine_acc = acc
         try:
             self._tune_fine(dwell.centre_hz)
-            while not self._stop.is_set():
+            while not self._halted():
                 left = acc.deadline - self._mono()
                 if left <= 0:
                     break
@@ -495,17 +579,21 @@ class Scout:
         finally:
             with self._fine_lock:
                 self._fine_acc = None
-        if self._stop.is_set():
+        if self._halted():
             return [], None
-        sweeps, row, _ = self._rows(acc, start_utc=start_utc, duration_s=self.s.dwell_s,
-                                    cost=FINE)
-        if row is None:
+        sweeps, row, _, outcome = self._rows(acc, start_utc=start_utc,
+                                             duration_s=self.s.dwell_s, cost=FINE,
+                                             min_frames=self.s.min_frames)
+        if outcome == "starved":
             self._fine_stale = True
         return sweeps, row
 
     def _close_coarse_window(self) -> None:
-        """Run the window's dashes through the line search, write its rows,
-        flag the fine cycle, and start the next window."""
+        """Run the window's dashes through the line search, write its wide
+        sweeps, flag the fine cycle for its narrow ones, and start the next
+        window.  A window short of COARSE_MIN_FRAME_SHARE of its promised
+        frames writes nothing; a silent one closes the coarse stream, which
+        the run loop then reopens."""
         t1 = self._mono()
         with self._coarse_lock:
             acc = self._coarse_acc
@@ -515,20 +603,32 @@ class Scout:
         t0, self._coarse_t0 = self._coarse_t0, t1
         if acc is None:
             return
-        sweeps, row, passed = self._rows(acc, start_utc=start_utc, duration_s=t1 - t0,
-                                         cost=COARSE)
-        if row is None:
-            if self._coarse is not None and acc.counts["frames_received"] == 0:
+        window_s = t1 - t0
+        need = int(np.ceil(COARSE_MIN_FRAME_SHARE * window_s / self.s.coarse_poll_s))
+        sweeps, row, passed, outcome = self._rows(acc, start_utc=start_utc,
+                                                  duration_s=window_s, cost=COARSE,
+                                                  min_frames=need)
+        if outcome != "ok":
+            if (outcome == "starved" and self._coarse is not None
+                    and acc.counts["frames_received"] == 0):
                 log.warning("coarse stream silent for a window; opening it afresh")
                 old, self._coarse = self._coarse, None
                 _stop_stream(old, "coarse")
-                self._reopen_coarse()
             return
-        for r in sweeps:
+        # A sweep narrower than a fine window is the fine view's to measure:
+        # the coarse view writes only the wide sweepers (R19).
+        wide = [r for r in sweeps if r["span_hz"] >= self.s.fine_span_hz]
+        for r in wide:
             self._write("sweep", r)
-        self._write("scout_dwell", row)
+        if COARSE_DWELL_ROWS:
+            self._write("scout_dwell", row)
+        log.info("coarse window %.0f s: %d frames (%d less bursts), %d streaks, %d passed, "
+                 "%d wide sweep rows; no dwell row (%s)", window_s, acc.n_frames, acc.n_used,
+                 int(row["engineering"]["streaks_found"]), len(passed), len(wide),
+                 ", ".join(f"{k} {v}" for k, v in row["engineering"].items()))
         half = self.s.fine_span_hz / 2
         targets = [t * 1e6 for t in self.s.targets_mhz]
+        flags = 0
         for s, key, eng in passed:
             # The fixed windows already cover their bands, where the coarse
             # view mis-measures CODAR; a wideband sweeper stays the coarse view's.
@@ -536,17 +636,14 @@ class Scout:
                 continue
             if any(abs(s.centre_hz - t) <= half for t in targets):
                 continue
-            log.info("coarse streak at %.3f MHz, %.0f Hz/s: flagged for a fine dwell",
-                     s.centre_hz / 1e6, s.rate_hz_per_s)
-            self.cycle.flag(s.centre_hz, self._mono())
-
-    def _reopen_coarse(self) -> None:
-        """Open the coarse stream again; a failure is logged and leaves it
-        closed, and the run loop tries again on its next pass."""
-        try:
-            self._open_coarse()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("coarse stream reopen failed (%s); retrying next pass", exc)
+            if flags >= COARSE_MAX_FLAGS:
+                log.info("coarse window: flag cap %d reached; %.3f MHz not flagged",
+                         COARSE_MAX_FLAGS, s.centre_hz / 1e6)
+                continue
+            if self.cycle.flag(s.centre_hz, self._mono()):
+                flags += 1
+                log.info("coarse streak at %.3f MHz, %.0f Hz/s: flagged for a fine dwell",
+                         s.centre_hz / 1e6, s.rate_hz_per_s)
 
     def _coarse_held(self) -> int:
         with self._coarse_lock:
@@ -563,16 +660,32 @@ class Scout:
             log.warning("published chirps not loaded (%s); keeping %d", exc,
                         len(self.published.chirps))
 
+    def _open_coarse_backed_off(self) -> bool:
+        """Open the coarse stream (and the control) unless radiod's backoff
+        says wait; True once it is open."""
+        if not self._backoff.due():
+            self._wait(self._stop, self._backoff.wait_s())
+            return False
+        try:
+            self._open_coarse()
+        except Exception as exc:  # noqa: BLE001
+            self._backoff.failed(exc)
+            return False
+        self._backoff.ok()
+        return True
+
     def run(self, stop: threading.Event, max_dwells: Optional[int] = None) -> None:
-        """Scout until ``stop`` is set (or after ``max_dwells`` fine dwells)."""
+        """Scout until ``stop`` is set (or after ``max_dwells`` fine dwells).
+        Raises ScoutConfigError when nyquist_hz contradicts radiod."""
         self._stop = stop
         dwells = 0
         try:
             self._refresh_published()
-            self._open_coarse()
-            while not stop.is_set():
-                if self._coarse is None:
-                    self._reopen_coarse()
+            while not self._halted():
+                if self._coarse is None and not self._open_coarse_backed_off():
+                    continue
+                if self._halted():
+                    break
                 self._refresh_published()
                 dwell = self.cycle.next(self.published, self._mono())
                 try:
@@ -580,14 +693,14 @@ class Scout:
                 except Exception as exc:  # noqa: BLE001
                     log.warning("dwell at %.3f MHz failed: %s", dwell.centre_hz / 1e6, exc)
                     self._fine_stale = True
-                    stop.wait(RETRY_S)
+                    self._wait(stop, RETRY_S)
                     sweeps, row = [], None
                 if row is not None:
                     for r in sweeps:
                         self._write("sweep", r)
                     self._write("scout_dwell", row)
                 dwells += 1
-                if not stop.is_set():
+                if not self._halted():
                     held = self._coarse_held()
                     if held > self.coarse_max_held:
                         log.warning("coarse window closed early at %d dashes", held)
@@ -598,3 +711,5 @@ class Scout:
                     break
         finally:
             self.close()
+        if self.fatal is not None:
+            raise ScoutConfigError(self.fatal)

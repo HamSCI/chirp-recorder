@@ -300,6 +300,9 @@ def _handle_scout(args) -> int:
             signal.signal(sig, lambda *_: stop.set())
     try:
         runner.Scout(settings, cfg.reporter_id, writer=writer).run(stop, max_dwells=args.dwells)
+    except runner.ScoutConfigError as exc:
+        print(f"chirp-recorder: {exc}", file=sys.stderr)
+        return 1
     finally:
         if close is not None:
             close()
